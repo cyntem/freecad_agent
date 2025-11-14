@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import traceback
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -149,6 +150,9 @@ class _EmbeddedFreeCADRuntime:
     @classmethod
     def try_create(cls) -> Optional["_EmbeddedFreeCADRuntime"]:
         if FreeCAD is None:
+            return None
+        if threading.current_thread() is not threading.main_thread():
+            logger.debug("Embedded FreeCAD runtime disabled outside the main thread")
             return None
         return cls()
 

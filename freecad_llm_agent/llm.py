@@ -9,7 +9,7 @@ import mimetypes
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Iterable, List, Optional, Sequence, Dict, Any
 
 try:  # pragma: no cover - optional dependency for remote providers
     import httpx
@@ -25,6 +25,16 @@ class Message:
 
     role: str
     content: str
+
+
+@dataclass
+class OpenRouterModelInfo:
+    """Description of a model exposed via OpenRouter."""
+
+    model_id: str
+    vendor: str
+    display_name: str
+    supports_images: Optional[bool] = None
 
 
 class LLMClient(ABC):
@@ -308,8 +318,8 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
 
 def fetch_openrouter_models(
     api_key: str, api_base: Optional[str] = None, timeout: float = 30.0
-) -> List[str]:
-    """Return a list of model identifiers available to the OpenRouter account."""
+) -> List[OpenRouterModelInfo]:
+    """Return metadata about models that are available to the OpenRouter account."""
 
     if httpx is None:  # pragma: no cover - runtime guard
         raise RuntimeError("httpx is required to query the OpenRouter API")
@@ -319,12 +329,56 @@ def fetch_openrouter_models(
     response = httpx.get(url, headers=headers, timeout=timeout)
     response.raise_for_status()
     data = response.json()
-    models: List[str] = []
+    models: List[OpenRouterModelInfo] = []
     for item in data.get("data", []):
         model_id = item.get("id")
-        if model_id:
-            models.append(str(model_id))
+        if not model_id:
+            continue
+        vendor = _extract_vendor(str(model_id), item)
+        display_name = _extract_display_name(str(model_id), item)
+        supports_images = _detect_image_support(item.get("architecture"))
+        models.append(
+            OpenRouterModelInfo(
+                model_id=str(model_id),
+                vendor=vendor,
+                display_name=display_name,
+                supports_images=supports_images,
+            )
+        )
+    models.sort(key=lambda info: (info.vendor.lower(), info.display_name.lower()))
     return models
+
+
+def _extract_vendor(model_id: str, payload: Dict[str, Any]) -> str:
+    if "/" in model_id:
+        return model_id.split("/", 1)[0]
+    name = payload.get("name")
+    if isinstance(name, str) and ":" in name:
+        return name.split(":", 1)[0].strip().lower().replace(" ", "-")
+    return "unknown"
+
+
+def _extract_display_name(model_id: str, payload: Dict[str, Any]) -> str:
+    name = payload.get("name")
+    if isinstance(name, str) and name.strip():
+        return name.split(":", 1)[-1].strip() if ":" in name else name.strip()
+    return model_id
+
+
+def _detect_image_support(architecture: Optional[Dict[str, Any]]) -> Optional[bool]:
+    if not architecture:
+        return None
+    modalities = architecture.get("input_modalities")
+    if isinstance(modalities, list):
+        normalized = " ".join(str(mod).lower() for mod in modalities)
+        if "image" in normalized:
+            return True
+        if normalized:
+            return False
+    modality = architecture.get("modality")
+    if isinstance(modality, str) and modality:
+        return "image" in modality.lower()
+    return None
 
 
 def dump_messages(messages: Sequence[Message]) -> str:
@@ -343,5 +397,6 @@ __all__ = [
     "OpenRouterLLMClient",
     "create_llm_client",
     "fetch_openrouter_models",
+    "OpenRouterModelInfo",
     "dump_messages",
 ]
