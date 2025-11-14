@@ -62,17 +62,21 @@ class FreeCADEngine:
         self._workspace.mkdir(parents=True, exist_ok=True)
         self._embedded_runner = _EmbeddedFreeCADRuntime.try_create()
         self._executable = self._discover_executable()
+        self._macro_directory = _discover_macro_directory()
 
     def run_script(self, script_body: str, iteration: int) -> ScriptExecutionResult:
         script_path = self._workspace / f"iteration_{iteration}.py"
         script_path.write_text(script_body, encoding="utf-8")
         logger.info("Stored FreeCAD macro at %s", script_path)
 
-        if self._embedded_runner:
-            return self._embedded_runner.execute(script_body, script_path)
+        with _temporary_macro_copy(script_path, self._macro_directory) as installed_macro:
+            execution_path = installed_macro or script_path
 
-        if self._executable:
-            return self._run_with_freecad(script_path)
+            if self._embedded_runner:
+                return self._embedded_runner.execute(script_body, execution_path)
+
+            if self._executable:
+                return self._run_with_freecad(script_path, execution_path)
 
         return self._simulate_execution(script_body, script_path)
 
@@ -86,9 +90,14 @@ class FreeCADEngine:
         logger.warning("FreeCAD executable %s not found. Falling back to simulation.", path)
         return None
 
-    def _run_with_freecad(self, script_path: Path) -> ScriptExecutionResult:
+    def _run_with_freecad(self, script_path: Path, execution_path: Path) -> ScriptExecutionResult:
         log_path = script_path.with_suffix(".log")
-        cmd = [self._executable, "-l", str(log_path), str(script_path)]  # type: ignore[list-item]
+        cmd = [
+            self._executable,
+            "-l",
+            str(log_path),
+            str(execution_path),
+        ]  # type: ignore[list-item]
         env = os.environ.copy()
         if self._config.headless:
             env.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -341,6 +350,84 @@ class _EmbeddedFreeCADRuntime:
                     if name or label:
                         return [label or name]
         return []
+
+
+def _discover_macro_directory() -> Optional[Path]:
+    """Locate the directory FreeCAD uses to store user macros."""
+
+    if FreeCAD is None:
+        return None
+
+    get_macro_dir = getattr(FreeCAD, "getUserMacroDir", None)
+    if callable(get_macro_dir):
+        try:
+            path = Path(get_macro_dir()).expanduser()
+            if path:
+                path.mkdir(parents=True, exist_ok=True)
+                logger.debug("Using FreeCAD macro directory %s", path)
+                return path
+        except Exception:  # pragma: no cover - depends on FreeCAD runtime
+            logger.debug("Failed to query FreeCAD user macro dir", exc_info=True)
+
+    param_get = getattr(FreeCAD, "ParamGet", None)
+    if callable(param_get):
+        try:
+            params = param_get("User parameter:BaseApp/Preferences/Macro")
+            macro_path = params.GetString("MacroPath", "")
+            if macro_path:
+                path = Path(macro_path).expanduser()
+                path.mkdir(parents=True, exist_ok=True)
+                logger.debug("Using macro path from parameters: %s", path)
+                return path
+        except Exception:  # pragma: no cover - depends on FreeCAD runtime
+            logger.debug("Failed to read macro preferences", exc_info=True)
+
+    get_user_data = getattr(FreeCAD, "getUserAppDataDir", None)
+    if callable(get_user_data):
+        try:
+            base_dir = Path(get_user_data()).expanduser()
+            if base_dir:
+                path = base_dir / "Macro"
+                path.mkdir(parents=True, exist_ok=True)
+                logger.debug("Using macro directory derived from app data: %s", path)
+                return path
+        except Exception:  # pragma: no cover - depends on FreeCAD runtime
+            logger.debug("Failed to derive macro directory from app data", exc_info=True)
+
+    logger.debug("FreeCAD macro directory not found; executing macros from workspace")
+    return None
+
+
+@contextlib.contextmanager
+def _temporary_macro_copy(
+    script_path: Path, macro_dir: Optional[Path]
+):  # pragma: no cover - depends on FreeCAD runtime
+    """Copy a macro into FreeCAD's macro directory for the duration of execution."""
+
+    if not macro_dir:
+        yield None
+        return
+
+    try:
+        macro_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.debug("Cannot create macro directory %s", macro_dir, exc_info=True)
+        yield None
+        return
+
+    target_path = macro_dir / script_path.name
+    try:
+        shutil.copy2(script_path, target_path)
+    except OSError:
+        logger.debug("Failed to copy macro %s to %s", script_path, target_path, exc_info=True)
+        yield None
+        return
+
+    try:
+        yield target_path
+    finally:
+        with contextlib.suppress(OSError):
+            target_path.unlink()
 
 
 if QtCore is not None:
