@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class IterationArtifact:
     iteration: int
     script_path: Path
+    script_body: str
     output_log: List[str]
     render_paths: List[Path]
     success: bool
@@ -66,6 +67,7 @@ class DesignAgent:
         errors: List[str] = []
         assembly_required = self._require_assembly(requirement)
         pending_additional_views = False
+        script_history: List[str] = []
 
         for iteration in range(1, self._config.pipeline.max_iterations + 1):
             logger.info("Starting iteration %s", iteration)
@@ -77,8 +79,10 @@ class DesignAgent:
                     or pending_additional_views
                 ),
                 requires_assembly=assembly_required,
+                script_history=list(script_history),
             )
             script = self._generator.generate(context)
+            script_history.append(script)
             execution = self._engine.run_script(script, iteration)
             renders = self._renderer.render(requirement, iteration)
             review = self._review_renders(requirement, iteration, renders, execution.success)
@@ -86,6 +90,7 @@ class DesignAgent:
             artifact = IterationArtifact(
                 iteration=iteration,
                 script_path=execution.script_path,
+                script_body=script,
                 output_log=execution.output_log,
                 render_paths=[render.image_path for render in renders],
                 success=execution.success,

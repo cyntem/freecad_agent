@@ -33,6 +33,7 @@ class ScriptGenerationContext:
     environment: EnvironmentInfo = field(default_factory=EnvironmentInfo)
     request_additional_views: bool = False
     requires_assembly: bool = False
+    script_history: List[str] = field(default_factory=list)
 
 
 class ScriptGenerator:
@@ -47,7 +48,9 @@ class ScriptGenerator:
                 role="system",
                 content=(
                     "You are a FreeCAD automation expert. Generate executable Python macros "
-                    "that follow FreeCAD API best practices and always call doc.recompute()."
+                    "that follow FreeCAD API best practices, always call doc.recompute(), and "
+                    "ensure the active project document ('LLMAgentProject') stays visible so the "
+                    "3D preview updates while the macro runs."
                 ),
             ),
             Message(
@@ -68,6 +71,16 @@ class ScriptGenerator:
             f"Notes: {context.environment.notes}",
             "",
         ]
+        if context.script_history:
+            lines.append("=== PREVIOUS PYTHON CONTEXT ===")
+            history_limit = 3
+            history_slice = context.script_history[-history_limit:]
+            start_index = len(context.script_history) - len(history_slice) + 1
+            for offset, script in enumerate(history_slice):
+                lines.append(f"[Script {start_index + offset}]")
+                snippet = script.strip() or "# Empty script recorded"
+                lines.append(snippet)
+                lines.append("")
         if context.previous_errors:
             lines.extend(["=== PREVIOUS ERRORS ===", *context.previous_errors, ""])
         if context.request_additional_views:
@@ -80,7 +93,15 @@ class ScriptGenerator:
                     "workbenches and ensure each sub-component document is loaded before constraints are solved.",
                 ]
             )
-        lines.append("Return only Python code without markdown fences.")
+        lines.extend(
+            [
+                "=== DOCUMENT WORKFLOW RULES ===",
+                "Reuse FreeCAD.ActiveDocument and create a document named 'LLMAgentProject' if it does not exist.",
+                "Add new Bodies/Parts to the active document, keep it active, and avoid deleting previously generated geometry.",
+                "Ensure the preview updates by calling doc.recompute() and, when Gui is available, fit the active view.",
+                "Return only Python code without markdown fences.",
+            ]
+        )
         return "\n".join(lines)
 
 

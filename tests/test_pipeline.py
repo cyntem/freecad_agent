@@ -12,6 +12,8 @@ def test_pipeline_produces_artifacts(tmp_path: Path, monkeypatch):
     report = agent.run("Тестовое задание: создать корпус.")
     assert report.artifacts, "Agent must produce at least one iteration"
     assert report.artifacts[0].script_path.exists()
+    assert report.artifacts[0].script_body.strip(), "Script body must be preserved for context"
+    assert report.artifacts[0].script_path.read_text(encoding="utf-8") == report.artifacts[0].script_body
     for artifact in report.artifacts:
         for render in artifact.render_paths:
             assert Path(render).exists()

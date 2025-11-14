@@ -146,6 +146,7 @@ class _EmbeddedFreeCADRuntime:
 
     def __init__(self) -> None:
         self._namespace: Dict[str, object] = {}
+        self._project_doc_name = "LLMAgentProject"
 
     @classmethod
     def try_create(cls) -> Optional["_EmbeddedFreeCADRuntime"]:
@@ -159,6 +160,7 @@ class _EmbeddedFreeCADRuntime:
     def execute(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
         buffer = io.StringIO()
         try:
+            self._ensure_project_document()
             compiled = compile(script_body, str(script_path), "exec")
             with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
                 exec(compiled, self._namespace)
@@ -204,6 +206,55 @@ class _EmbeddedFreeCADRuntime:
                 send_msg("ViewFit")
         except Exception:  # pragma: no cover - FreeCAD specific
             logger.debug("Failed to update FreeCAD GUI", exc_info=True)
+
+    def _ensure_project_document(self) -> None:
+        if FreeCAD is None:
+            return
+        document = getattr(FreeCAD, "ActiveDocument", None)
+        if document is None:
+            document = self._get_existing_document()
+        if document is None:
+            create_document = getattr(FreeCAD, "newDocument", None)
+            if callable(create_document):
+                try:
+                    document = create_document(self._project_doc_name)
+                except Exception:  # pragma: no cover - FreeCAD specific
+                    logger.debug("Failed to create persistent FreeCAD document", exc_info=True)
+                    document = None
+        if document is None:
+            return
+        set_active = getattr(FreeCAD, "setActiveDocument", None)
+        if callable(set_active):
+            try:
+                set_active(document.Name)
+            except Exception:  # pragma: no cover - FreeCAD specific
+                logger.debug("Failed to set active document", exc_info=True)
+        FreeCAD.ActiveDocument = document
+        self._activate_gui_document(document)
+
+    def _get_existing_document(self):  # type: ignore[no-untyped-def]
+        get_doc = getattr(FreeCAD, "getDocument", None)
+        if callable(get_doc):
+            try:
+                return get_doc(self._project_doc_name)
+            except Exception:  # pragma: no cover - FreeCAD specific
+                logger.debug("Failed to fetch existing FreeCAD document", exc_info=True)
+        return None
+
+    def _activate_gui_document(self, document) -> None:  # type: ignore[no-untyped-def]
+        if FreeCADGui is None:
+            return
+        get_doc = getattr(FreeCADGui, "getDocument", None)
+        gui_document = None
+        if callable(get_doc):
+            try:
+                gui_document = get_doc(document.Name)
+            except Exception:  # pragma: no cover - FreeCAD specific
+                logger.debug("Failed to get GUI document", exc_info=True)
+        if gui_document is None:
+            gui_document = getattr(FreeCADGui, "ActiveDocument", None)
+        if gui_document is not None:
+            FreeCADGui.ActiveDocument = gui_document
 
 
 __all__ = ["ScriptExecutionResult", "FreeCADEngine"]
