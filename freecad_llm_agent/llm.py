@@ -198,6 +198,33 @@ class LocalLLMClient(_BaseHTTPChatClient):
         )
 
 
+class OpenRouterLLMClient(_BaseHTTPChatClient):
+    """Client for https://openrouter.ai REST API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        api_base: Optional[str] = None,
+        site_url: Optional[str] = None,
+        app_name: Optional[str] = None,
+    ) -> None:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if site_url:
+            headers["HTTP-Referer"] = site_url
+        if app_name:
+            headers["X-Title"] = app_name
+        super().__init__(
+            base_url=api_base or "https://openrouter.ai/api/v1",
+            headers=headers,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+
 def _messages_with_images(
     messages: Sequence[Message], images: Optional[Iterable[str]] = None
 ) -> List[dict]:
@@ -263,8 +290,41 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
             temperature=config.temperature,
             headers=config.local_headers,
         )
+    if provider == "openrouter":
+        if not config.api_key:
+            raise RuntimeError("OpenRouter provider requires api_key")
+        return OpenRouterLLMClient(
+            api_key=config.api_key,
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            api_base=config.openrouter_api_base,
+            site_url=config.openrouter_site_url,
+            app_name=config.openrouter_app_name,
+        )
 
     return DummyLLMClient(model=config.model, temperature=config.temperature)
+
+
+def fetch_openrouter_models(
+    api_key: str, api_base: Optional[str] = None, timeout: float = 30.0
+) -> List[str]:
+    """Return a list of model identifiers available to the OpenRouter account."""
+
+    if httpx is None:  # pragma: no cover - runtime guard
+        raise RuntimeError("httpx is required to query the OpenRouter API")
+    base_url = api_base or "https://openrouter.ai/api/v1"
+    url = f"{base_url.rstrip('/')}/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    response = httpx.get(url, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    models: List[str] = []
+    for item in data.get("data", []):
+        model_id = item.get("id")
+        if model_id:
+            models.append(str(model_id))
+    return models
 
 
 def dump_messages(messages: Sequence[Message]) -> str:
@@ -280,6 +340,8 @@ __all__ = [
     "OpenAILLMClient",
     "AzureOpenAILLMClient",
     "LocalLLMClient",
+    "OpenRouterLLMClient",
     "create_llm_client",
+    "fetch_openrouter_models",
     "dump_messages",
 ]
