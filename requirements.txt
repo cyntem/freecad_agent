@@ -1,3 +1,4 @@
 PyYAML>=6.0
 Pillow>=9.0
 httpx>=0.24
+atomicwrites>=1.4.1
