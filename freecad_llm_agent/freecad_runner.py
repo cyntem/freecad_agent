@@ -289,6 +289,7 @@ if QtCore is not None:
         """Runs embedded FreeCAD scripts on the GUI thread via Qt signals."""
 
         _finished = QtCore.Signal(object)
+        _execute_requested = QtCore.Signal(str, str)
 
         def __init__(self, runtime: _EmbeddedFreeCADRuntime) -> None:
             super().__init__()
@@ -297,6 +298,7 @@ if QtCore is not None:
             if app is None:
                 raise RuntimeError("Qt application instance is required for main-thread execution")
             self.moveToThread(app.thread())
+            self._execute_requested.connect(self._run_on_main_thread)
 
         @staticmethod
         def is_available() -> bool:
@@ -320,13 +322,7 @@ if QtCore is not None:
 
             self._finished.connect(_handle)
             try:
-                QtCore.QMetaObject.invokeMethod(
-                    self,
-                    "_run_on_main_thread",
-                    QtCore.Qt.QueuedConnection,
-                    QtCore.Q_ARG(str, script_body),
-                    QtCore.Q_ARG(str, str(script_path)),
-                )
+                self._execute_requested.emit(script_body, str(script_path))
                 exec_method = getattr(loop, "exec", None) or getattr(loop, "exec_", None)
                 if exec_method is None:  # pragma: no cover - Qt specific
                     raise RuntimeError("Qt event loop does not provide an exec method")
