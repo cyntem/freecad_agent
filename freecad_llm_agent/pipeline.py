@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from .config import AppConfig
 from .freecad_runner import FreeCADEngine
-from .llm import DummyLLMClient, LLMClient, Message
-from .rendering import Renderer
+from .llm import LLMClient, Message, create_llm_client
+from .rendering import RenderResult, Renderer
 from .script_generation import ScriptGenerationContext, ScriptGenerator
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,13 @@ class IterationArtifact:
     render_paths: List[Path]
     success: bool
     error: Optional[str] = None
+    render_feedback: Optional[str] = None
+
+
+@dataclass
+class RenderReview:
+    feedback: str
+    needs_additional_views: bool = False
 
 
 @dataclass
@@ -48,7 +56,7 @@ class DesignAgent:
 
     def __init__(self, config: AppConfig, llm_client: Optional[LLMClient] = None) -> None:
         self._config = config
-        self._llm = llm_client or DummyLLMClient(model=config.llm.model, temperature=config.llm.temperature)
+        self._llm = llm_client or create_llm_client(config.llm)
         self._generator = ScriptGenerator(self._llm)
         self._engine = FreeCADEngine(config.freecad, config.pipeline.workspace)
         self._renderer = Renderer(config.renderer)
@@ -56,6 +64,8 @@ class DesignAgent:
     def run(self, requirement: str) -> PipelineReport:
         report = PipelineReport(requirement=requirement)
         errors: List[str] = []
+        assembly_required = self._require_assembly(requirement)
+        pending_additional_views = False
 
         for iteration in range(1, self._config.pipeline.max_iterations + 1):
             logger.info("Starting iteration %s", iteration)
@@ -63,12 +73,16 @@ class DesignAgent:
                 requirement=requirement,
                 previous_errors=list(errors),
                 request_additional_views=(
-                    self._config.pipeline.request_additional_views_on_failure and bool(errors)
+                    (self._config.pipeline.request_additional_views_on_failure and bool(errors))
+                    or pending_additional_views
                 ),
+                requires_assembly=assembly_required,
             )
             script = self._generator.generate(context)
             execution = self._engine.run_script(script, iteration)
             renders = self._renderer.render(requirement, iteration)
+            review = self._review_renders(requirement, iteration, renders, execution.success)
+            pending_additional_views = pending_additional_views or review.needs_additional_views
             artifact = IterationArtifact(
                 iteration=iteration,
                 script_path=execution.script_path,
@@ -76,6 +90,7 @@ class DesignAgent:
                 render_paths=[render.image_path for render in renders],
                 success=execution.success,
                 error=execution.error,
+                render_feedback=review.feedback,
             )
             report.artifacts.append(artifact)
 
@@ -89,5 +104,56 @@ class DesignAgent:
 
         return report
 
+    def _require_assembly(self, requirement: str) -> bool:
+        lowered = requirement.lower()
+        return any(keyword in lowered for keyword in ["assembly", "assemblies", "сборк"])
 
-__all__ = ["DesignAgent", "PipelineReport", "IterationArtifact"]
+    def _review_renders(
+        self,
+        requirement: str,
+        iteration: int,
+        renders: Iterable[RenderResult],
+        success: bool,
+    ) -> RenderReview:
+        image_paths = [str(render.image_path) for render in renders]
+        if not image_paths:
+            return RenderReview(feedback="Rendering disabled")
+
+        system_prompt = (
+            "You are a manufacturing inspector reviewing rendered CAD previews. "
+            "Respond with JSON containing 'needs_additional_views' (true/false) and 'feedback'."
+        )
+        user_prompt = "\n".join(
+            [
+                "=== RENDER REVIEW ===",
+                f"Requirement: {requirement.strip()}",
+                f"Iteration: {iteration}",
+                f"Succeeded: {success}",
+                "If geometry is unclear request additional projections.",
+            ]
+        )
+        messages = [
+            Message(role="system", content=system_prompt),
+            Message(role="user", content=user_prompt),
+        ]
+        try:
+            response = self._llm.complete(messages, images=image_paths)
+            return self._parse_render_response(response)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning("Render review failed: %s", exc)
+            return RenderReview(feedback=f"Render review failed: {exc}")
+
+    def _parse_render_response(self, response: str) -> RenderReview:
+        try:
+            data = json.loads(response)
+            needs_more = bool(data.get("needs_additional_views"))
+            feedback = str(data.get("feedback", "")) or "LLM render review complete"
+            return RenderReview(feedback=feedback, needs_additional_views=needs_more)
+        except json.JSONDecodeError:
+            lowered = response.lower()
+            needs_more = "additional" in lowered or "extra view" in lowered
+            feedback = response.strip() or "Render review response received"
+            return RenderReview(feedback=feedback, needs_additional_views=needs_more)
+
+
+__all__ = ["DesignAgent", "PipelineReport", "IterationArtifact", "RenderReview"]

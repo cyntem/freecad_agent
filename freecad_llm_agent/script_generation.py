@@ -32,6 +32,7 @@ class ScriptGenerationContext:
     previous_errors: List[str] = field(default_factory=list)
     environment: EnvironmentInfo = field(default_factory=EnvironmentInfo)
     request_additional_views: bool = False
+    requires_assembly: bool = False
 
 
 class ScriptGenerator:
@@ -71,6 +72,14 @@ class ScriptGenerator:
             lines.extend(["=== PREVIOUS ERRORS ===", *context.previous_errors, ""])
         if context.request_additional_views:
             lines.append("Render additional projections for better inspection.")
+        if context.requires_assembly:
+            lines.extend(
+                [
+                    "",
+                    "The requirement references an assembly. Import dependent parts using Assembly3/Assembly4/A2plus",
+                    "workbenches and ensure each sub-component document is loaded before constraints are solved.",
+                ]
+            )
         lines.append("Return only Python code without markdown fences.")
         return "\n".join(lines)
 
