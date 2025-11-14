@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import mimetypes
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, List, Optional, Sequence
+
+try:  # pragma: no cover - optional dependency for remote providers
+    import httpx
+except ImportError:  # pragma: no cover - optional dependency for remote providers
+    httpx = None  # type: ignore
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +45,17 @@ class DummyLLMClient(LLMClient):
     def complete(self, messages: Sequence[Message], images: Optional[Iterable[str]] = None) -> str:
         prompt = "\n".join(f"{m.role}: {m.content}" for m in messages)
         logger.debug("Dummy LLM received prompt: %s", prompt)
-        if "assembly" in prompt.lower():
+        lowered = prompt.lower()
+        if "=== render review ===" in lowered:
+            return json.dumps(
+                {
+                    "needs_additional_views": False,
+                    "feedback": "Rendered projections inspected in dummy mode.",
+                }
+            )
+        if "assembly" in lowered or "сборк" in lowered:
             return self._assembly_template(prompt)
-        if "error" in prompt.lower():
+        if "error" in lowered:
             return self._repair_template(prompt)
         return self._default_template(prompt)
 
@@ -70,10 +86,200 @@ class DummyLLMClient(LLMClient):
         return self._default_template(prompt) + "\nprint('Applied fix for previous error')"
 
 
+class _BaseHTTPChatClient(LLMClient):
+    """Shared utilities for HTTP-based chat completion providers."""
+
+    def __init__(
+        self,
+        base_url: str,
+        headers: dict[str, str],
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        timeout: float = 60.0,
+        path: str = "/chat/completions",
+        extra_params: Optional[dict[str, str]] = None,
+    ) -> None:
+        if httpx is None:  # pragma: no cover - runtime guard
+            raise RuntimeError("httpx is required for HTTP-based LLM providers. Install it via pip.")
+        self._client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout)
+        self._model = model
+        self._max_tokens = max_tokens
+        self._temperature = temperature
+        self._path = path
+        self._extra_params = extra_params or {}
+
+    def complete(self, messages: Sequence[Message], images: Optional[Iterable[str]] = None) -> str:
+        payload = {
+            "model": self._model,
+            "messages": _messages_with_images(messages, images),
+            "max_tokens": self._max_tokens,
+            "temperature": self._temperature,
+        }
+        payload.update(self._extra_params)
+        response = self._client.post(self._path, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        try:
+            return data["choices"][0]["message"]["content"].strip()
+        except (KeyError, IndexError) as error:  # pragma: no cover - defensive
+            raise RuntimeError(f"Malformed LLM response: {data}") from error
+
+
+class OpenAILLMClient(_BaseHTTPChatClient):
+    """LLM client that targets the public OpenAI REST API."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        api_base: Optional[str] = None,
+        organization: Optional[str] = None,
+    ) -> None:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        if organization:
+            headers["OpenAI-Organization"] = organization
+        super().__init__(
+            base_url=api_base or "https://api.openai.com/v1",
+            headers=headers,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+
+class AzureOpenAILLMClient(_BaseHTTPChatClient):
+    """LLM client configured for Azure OpenAI deployments."""
+
+    def __init__(
+        self,
+        api_key: str,
+        endpoint: str,
+        deployment: str,
+        api_version: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> None:
+        if not endpoint.endswith("/"):
+            endpoint = endpoint + "/"
+        path = f"openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+        headers = {"api-key": api_key}
+        super().__init__(
+            base_url=endpoint,
+            headers=headers,
+            model=deployment,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            path=path,
+        )
+
+
+class LocalLLMClient(_BaseHTTPChatClient):
+    """Simple HTTP client that targets locally hosted models with an OpenAI-compatible API."""
+
+    def __init__(
+        self,
+        endpoint: str,
+        model: str,
+        max_tokens: int,
+        temperature: float,
+        headers: Optional[dict[str, str]] = None,
+    ) -> None:
+        if not endpoint:
+            raise ValueError("Local endpoint URL must be provided for the 'local' provider")
+        super().__init__(
+            base_url=endpoint,
+            headers=headers or {},
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+
+def _messages_with_images(
+    messages: Sequence[Message], images: Optional[Iterable[str]] = None
+) -> List[dict]:
+    payload: List[dict] = []
+    for message in messages:
+        payload.append({"role": message.role, "content": [{"type": "text", "text": message.content}]})
+
+    if images:
+        image_payload = _encode_images(images)
+        if not payload or payload[-1]["role"] != "user":
+            payload.append({"role": "user", "content": []})
+        payload[-1]["content"].extend(image_payload)
+    return payload
+
+
+def _encode_images(images: Iterable[str]) -> List[dict]:
+    encoded: List[dict] = []
+    for path in images:
+        image_path = Path(path)
+        if not image_path.exists():
+            logger.warning("Render image %s is missing, skipping", image_path)
+            continue
+        data = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        mime, _ = mimetypes.guess_type(image_path.name)
+        mime = mime or "image/png"
+        encoded.append({"type": "input_image", "image_url": {"url": f"data:{mime};base64,{data}"}})
+    return encoded
+
+
+def create_llm_client(config: "LLMConfig") -> LLMClient:
+    """Return an ``LLMClient`` based on the provided configuration."""
+
+    provider = config.provider.lower()
+    if provider == "openai":
+        if not config.api_key:
+            raise RuntimeError("OpenAI provider requires api_key")
+        return OpenAILLMClient(
+            api_key=config.api_key,
+            model=config.model,
+            api_base=config.api_base,
+            organization=config.organization,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+        )
+    if provider == "azure":
+        if not (config.api_key and config.azure_endpoint and config.azure_deployment):
+            raise RuntimeError("Azure provider requires api_key, azure_endpoint and azure_deployment")
+        return AzureOpenAILLMClient(
+            api_key=config.api_key,
+            endpoint=config.azure_endpoint,
+            deployment=config.azure_deployment,
+            api_version=config.azure_api_version,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+        )
+    if provider == "local":
+        if not config.local_endpoint:
+            raise RuntimeError("Local provider requires local_endpoint")
+        return LocalLLMClient(
+            endpoint=config.local_endpoint,
+            model=config.model,
+            max_tokens=config.max_tokens,
+            temperature=config.temperature,
+            headers=config.local_headers,
+        )
+
+    return DummyLLMClient(model=config.model, temperature=config.temperature)
+
+
 def dump_messages(messages: Sequence[Message]) -> str:
     """Return a human-readable representation of the conversation."""
 
     return json.dumps([message.__dict__ for message in messages], ensure_ascii=False, indent=2)
 
 
-__all__ = ["Message", "LLMClient", "DummyLLMClient", "dump_messages"]
+__all__ = [
+    "Message",
+    "LLMClient",
+    "DummyLLMClient",
+    "OpenAILLMClient",
+    "AzureOpenAILLMClient",
+    "LocalLLMClient",
+    "create_llm_client",
+    "dump_messages",
+]

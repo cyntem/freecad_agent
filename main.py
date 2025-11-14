@@ -45,6 +45,7 @@ def main() -> None:
                 "renders": [str(path) for path in artifact.render_paths],
                 "success": artifact.success,
                 "error": artifact.error,
+                "render_feedback": artifact.render_feedback,
             }
             for artifact in report.artifacts
         ],

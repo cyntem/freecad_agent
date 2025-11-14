@@ -30,6 +30,13 @@ class LLMConfig:
     provider: str = "dummy"
     model: str = "gpt-4o-mini"
     api_key: Optional[str] = None
+    api_base: Optional[str] = None
+    organization: Optional[str] = None
+    azure_endpoint: Optional[str] = None
+    azure_deployment: Optional[str] = None
+    azure_api_version: str = "2024-02-01"
+    local_endpoint: Optional[str] = None
+    local_headers: Dict[str, str] = field(default_factory=dict)
     max_tokens: int = 2048
     temperature: float = 0.1
 
