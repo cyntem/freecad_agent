@@ -98,7 +98,7 @@ class DesignAgent:
                 requires_assembly=assembly_required,
                 script_history=list(script_history),
             )
-            script = self._generator.generate(context)
+            script = self._normalize_script(self._generator.generate(context))
             script_history.append(script)
             _ensure_not_cancelled()
             execution = self._engine.run_script(script, iteration)
@@ -180,6 +180,26 @@ class DesignAgent:
             needs_more = "additional" in lowered or "extra view" in lowered
         feedback = response.strip() or "Render review response received"
         return RenderReview(feedback=feedback, needs_additional_views=needs_more)
+
+    def _normalize_script(self, script: str) -> str:
+        """Remove common LLM wrappers (Markdown/code fences) from scripts."""
+
+        if not script:
+            return script
+
+        stripped = script.strip()
+
+        if stripped.startswith("```"):
+            lines = stripped.splitlines()
+            if len(lines) >= 2 and lines[-1].strip().startswith("```"):
+                return "\n".join(lines[1:-1]).strip("\n")
+
+        for quote in ('"""', "'''"):
+            if stripped.startswith(quote) and stripped.endswith(quote):
+                inner = stripped[len(quote) : -len(quote)]
+                return inner.strip("\n")
+
+        return script
 
     def _format_execution_feedback(self, iteration: int, execution: "ScriptExecutionResult") -> str:
         lines = [f"Iteration {iteration} FreeCAD execution failed."]
