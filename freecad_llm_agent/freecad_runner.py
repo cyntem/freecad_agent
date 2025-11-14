@@ -243,6 +243,8 @@ class _EmbeddedFreeCADRuntime:
             return
         document = getattr(FreeCAD, "ActiveDocument", None)
         if document is None:
+            document = self._document_from_gui()
+        if document is None:
             document = self._get_existing_document()
         if document is None:
             create_document = getattr(FreeCAD, "newDocument", None)
@@ -267,6 +269,15 @@ class _EmbeddedFreeCADRuntime:
                 logger.debug("Failed to set active document", exc_info=True)
         FreeCAD.ActiveDocument = document
         self._activate_gui_document(document)
+
+    def _document_from_gui(self):  # type: ignore[no-untyped-def]
+        if FreeCADGui is None:
+            return None
+        gui_document = getattr(FreeCADGui, "ActiveDocument", None)
+        if gui_document is None:
+            return None
+        document = getattr(gui_document, "Document", None)
+        return document
 
     def _get_existing_document(self):  # type: ignore[no-untyped-def]
         get_doc = getattr(FreeCAD, "getDocument", None)

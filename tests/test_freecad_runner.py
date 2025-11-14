@@ -54,3 +54,41 @@ def test_embedded_runner_refreshes_gui(monkeypatch, tmp_path):
     assert view.fit_calls >= 1
     assert messages and messages[-1] == "ViewFit"
     assert updates, "FreeCAD GUI should be refreshed"
+
+
+def test_embedded_runner_uses_gui_active_document(monkeypatch, tmp_path):
+    import freecad_llm_agent.freecad_runner as runner
+
+    class _Doc:
+        def __init__(self, name: str) -> None:
+            self.Name = name
+            self.Objects = []
+            self.ActiveObject = None
+
+    document = _Doc("GuiDoc")
+    gui_document = SimpleNamespace(Document=document, Name=document.Name)
+
+    class _FreeCADStub:
+        def __init__(self) -> None:
+            self.ActiveDocument = None
+            self.set_calls: list[str] = []
+
+        def setActiveDocument(self, name: str) -> None:
+            self.set_calls.append(name)
+
+    freecad_stub = _FreeCADStub()
+
+    def _get_document(name: str):  # noqa: D401 - mimic FreeCADGui API
+        assert name == document.Name
+        return gui_document
+
+    gui_stub = SimpleNamespace(ActiveDocument=gui_document, getDocument=_get_document)
+
+    monkeypatch.setattr(runner, "FreeCAD", freecad_stub, raising=False)
+    monkeypatch.setattr(runner, "FreeCADGui", gui_stub, raising=False)
+
+    runtime = runner._EmbeddedFreeCADRuntime()
+    runtime._ensure_project_document()
+
+    assert freecad_stub.ActiveDocument is document
+    assert freecad_stub.set_calls and freecad_stub.set_calls[-1] == document.Name

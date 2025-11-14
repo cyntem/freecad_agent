@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional, List
 from .config import AppConfig, load_config
 from .pipeline import DesignAgent, PipelineReport
 from .llm import OpenRouterModelInfo, fetch_openrouter_models
+from .freecad_runner import FreeCADEngine
 
 try:  # pragma: no cover - the GUI is only exercised inside FreeCAD
     from PySide6 import QtCore, QtWidgets  # type: ignore
@@ -39,6 +40,8 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._artifact_data: List[Dict[str, Any]] = []
         self._success_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton)
         self._failure_icon = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxCritical)
+        self._macro_thread: Optional[QtCore.QThread] = None
+        self._macro_worker: Optional["_MacroExecutionWorker"] = None
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
@@ -93,6 +96,14 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         scripts_splitter.setStretchFactor(0, 1)
         scripts_splitter.setStretchFactor(1, 2)
         layout.addWidget(scripts_splitter)
+
+        manual_run_layout = QtWidgets.QHBoxLayout()
+        manual_run_layout.addStretch()
+        self._run_selected_button = QtWidgets.QPushButton("Выполнить выбранный макрос")
+        self._run_selected_button.setEnabled(False)
+        self._run_selected_button.clicked.connect(self._execute_selected_macro)
+        manual_run_layout.addWidget(self._run_selected_button)
+        layout.addLayout(manual_run_layout)
 
         self.setWidget(container)
         self._load_persistent_settings()
@@ -389,6 +400,8 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._artifact_data = []
         self._artifact_list.clear()
         self._script_preview.clear()
+        if hasattr(self, "_run_selected_button"):
+            self._run_selected_button.setEnabled(False)
 
     def _update_artifact_list(self, summary: Dict[str, Any]) -> None:
         artifacts = summary.get("artifacts") if isinstance(summary, dict) else None
@@ -421,6 +434,8 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         item = self._artifact_list.currentItem()
         if not item:
             self._script_preview.clear()
+            if hasattr(self, "_run_selected_button"):
+                self._run_selected_button.setEnabled(False)
             return
         artifact = item.data(QtCore.Qt.UserRole) or {}
         script_body = artifact.get("script_body") or ""
@@ -448,6 +463,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         if header:
             header += "\n\n"
         self._script_preview.setPlainText(f"{header}{script_body}".strip())
+        self._run_selected_button.setEnabled(bool(script_body.strip()) or bool(artifact.get("script")))
 
     def _cleanup_worker(self) -> None:
         if self._worker:
@@ -464,6 +480,82 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         if self._model_thread:
             self._model_thread.deleteLater()
             self._model_thread = None
+
+    def _execute_selected_macro(self) -> None:
+        artifact = self._get_current_artifact()
+        if not artifact:
+            self._set_status("Выберите макрос для запуска", error=True)
+            return
+        script_body = artifact.get("script_body") or ""
+        script_path = artifact.get("script") or ""
+        if not script_body and script_path:
+            try:
+                script_body = Path(script_path).read_text(encoding="utf-8")
+            except OSError as exc:
+                self._set_status(f"Не удалось прочитать макрос: {exc}", error=True)
+                return
+        if not script_body.strip():
+            self._set_status("В макросе нет кода для выполнения", error=True)
+            return
+
+        self._run_selected_button.setEnabled(False)
+        self._set_status("Выполняется выбранный макрос...")
+
+        iteration = artifact.get("iteration")
+        iteration_value = iteration if isinstance(iteration, int) else None
+        self._macro_thread = QtCore.QThread(self)
+        self._macro_worker = _MacroExecutionWorker(script_body, self._config_path, iteration_value)
+        self._macro_worker.moveToThread(self._macro_thread)
+        self._macro_thread.started.connect(self._macro_worker.run)
+        self._macro_worker.finished.connect(self._handle_manual_macro_finished)
+        self._macro_worker.failed.connect(self._handle_manual_macro_failed)
+        self._macro_worker.finished.connect(self._macro_thread.quit)
+        self._macro_worker.failed.connect(self._macro_thread.quit)
+        self._macro_thread.finished.connect(self._cleanup_macro_worker)
+        self._macro_thread.start()
+
+    def _handle_manual_macro_finished(self, result: Dict[str, Any]) -> None:
+        success = bool(result.get("success"))
+        status = "Макрос выполнен" if success else "Макрос завершился с ошибкой"
+        self._set_status(status, error=not success)
+        header_lines = ["# Результат ручного запуска"]
+        script_path = result.get("script_path")
+        if script_path:
+            header_lines.append(f"# Файл: {script_path}")
+        error = result.get("error")
+        if error:
+            header_lines.append(f"# Ошибка: {error}")
+        objects = result.get("affected_objects") or []
+        if objects:
+            header_lines.append("# Объекты: " + ", ".join(objects))
+        log_lines = result.get("output_log") or []
+        text = "\n".join(header_lines)
+        if log_lines:
+            text = f"{text}\n\n" + "\n".join(log_lines)
+        self._response_output.setPlainText(text.strip())
+        self._run_selected_button.setEnabled(True)
+
+    def _handle_manual_macro_failed(self, message: str) -> None:
+        self._set_status("Ошибка выполнения макроса", error=True)
+        self._response_output.setPlainText(message)
+        self._run_selected_button.setEnabled(True)
+
+    def _cleanup_macro_worker(self) -> None:
+        if self._macro_worker:
+            self._macro_worker.deleteLater()
+            self._macro_worker = None
+        if self._macro_thread:
+            self._macro_thread.deleteLater()
+            self._macro_thread = None
+
+    def _get_current_artifact(self) -> Optional[Dict[str, Any]]:
+        item = self._artifact_list.currentItem()
+        if not item:
+            return None
+        artifact = item.data(QtCore.Qt.UserRole)
+        if isinstance(artifact, dict):
+            return artifact
+        return None
 
 
 class _AgentWorker(QtCore.QObject):
@@ -506,6 +598,41 @@ class _AgentWorker(QtCore.QObject):
                 continue
             if hasattr(config.llm, key):
                 setattr(config.llm, key, value)
+
+
+class _MacroExecutionWorker(QtCore.QObject):
+    """Executes a single macro body using the embedded FreeCAD engine."""
+
+    finished = QtCore.Signal(dict)
+    failed = QtCore.Signal(str)
+
+    def __init__(
+        self,
+        script_body: str,
+        config_path: Optional[Path],
+        iteration: Optional[int] = None,
+    ) -> None:
+        super().__init__()
+        self._script_body = script_body
+        self._config_path = config_path
+        self._iteration = iteration or 0
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            config = load_config(self._config_path)
+            engine = FreeCADEngine(config.freecad, config.pipeline.workspace)
+            result = engine.run_script(self._script_body, iteration=max(0, self._iteration))
+            payload = {
+                "success": result.success,
+                "error": result.error,
+                "output_log": result.output_log,
+                "script_path": str(result.script_path),
+                "affected_objects": result.affected_objects,
+            }
+            self.finished.emit(payload)
+        except Exception:  # pragma: no cover - defensive
+            self.failed.emit(traceback.format_exc())
 
 
 class _ModelFetchWorker(QtCore.QObject):
