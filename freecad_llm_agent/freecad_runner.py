@@ -81,13 +81,44 @@ class FreeCADEngine:
         return self._simulate_execution(script_body, script_path)
 
     def _discover_executable(self) -> Optional[str]:
-        path = self._config.executable_path
-        if path.exists():
-            return str(path)
-        found = shutil.which(str(path))
-        if found:
-            return found
-        logger.warning("FreeCAD executable %s not found. Falling back to simulation.", path)
+        """Locate the FreeCAD executable using common installation paths."""
+
+        configured_path = self._config.executable_path
+        candidates: List[Path] = []
+
+        def _push(path_like: Optional[object]) -> None:
+            if not path_like:
+                return
+            path = Path(str(path_like))
+            if path not in candidates:
+                candidates.append(path)
+
+        _push(configured_path)
+        _push(os.environ.get("FREECAD_EXECUTABLE"))
+
+        known_locations = [
+            Path("/snap/bin/freecadcmd"),
+            Path("/usr/lib/freecad/bin/freecadcmd"),
+            Path("/usr/lib/freecad/bin/FreeCADCmd"),
+        ]
+        for location in known_locations:
+            _push(location)
+
+        for executable_name in {configured_path.name if configured_path.name else "freecadcmd", "freecadcmd", "FreeCADCmd"}:
+            found = shutil.which(executable_name)
+            if found:
+                _push(found)
+
+        for path in candidates:
+            if path.exists():
+                if path != configured_path:
+                    logger.info("Detected FreeCAD executable at %s", path)
+                return str(path)
+
+        logger.warning(
+            "FreeCAD executable %s not found in known locations. Falling back to simulation.",
+            configured_path,
+        )
         return None
 
     def _run_with_freecad(self, script_path: Path, execution_path: Path) -> ScriptExecutionResult:
