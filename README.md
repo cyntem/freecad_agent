@@ -81,6 +81,36 @@ When FreeCAD is installed via Snap, the sandboxed environment uses a different c
 
 After these steps the extension becomes available in the FreeCAD UI.
 
+### Installing Python dependencies for the FreeCAD environment
+Copying or cloning this repository into the `Mod` directory only makes the UI
+available—the Python dependencies listed in `requirements.txt` are not installed
+automatically into FreeCAD's embedded interpreter. Install them manually:
+
+**Windows (official installer):**
+1. Open **PowerShell** and navigate to the directory where you placed the
+   extension, e.g. `cd $env:APPDATA\FreeCAD\Mod\LLMAgent`.
+2. Use the Python executable bundled with FreeCAD to install the requirements:
+   ```powershell
+   "${env:ProgramFiles}\FreeCAD 0.21\bin\python.exe" -m pip install -r requirements.txt
+   ```
+   Adjust the path if FreeCAD is installed elsewhere.
+
+**Linux (Snap build):**
+1. Drop into the sandbox shell so you can run the confined Python interpreter:
+   ```bash
+   snap run --shell freecad
+   ```
+2. Inside that shell install the dependencies to the user site directory that
+   the Snap build can read:
+   ```bash
+   cd "$SNAP_USER_COMMON/Mod/LLMAgent"
+   "$SNAP/usr/bin/python3" -m pip install --user -r requirements.txt
+   ```
+3. Type `exit` to leave the Snap shell and restart FreeCAD.
+
+Installing the packages through the FreeCAD-provided Python ensures they end up
+in the environment that executes the workbench macros.
+
 ## FreeCAD extension and graphical interface
 1. Launch FreeCAD ≥0.21 and switch to the **LLM Agent** workbench. The dock widget provides a task input field, an output log, and OpenRouter settings.
 2. To connect to OpenRouter, supply your API key and, if needed, `HTTP-Referer` (your application URL) plus `X-Title` (integration name). The **Refresh model list** button calls the `/models` API and lets you choose any available model.
