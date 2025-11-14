@@ -1,8 +1,10 @@
 from pathlib import Path
 
+import pytest
+
 from freecad_llm_agent.config import load_config, AppConfig
 from freecad_llm_agent.freecad_runner import ScriptExecutionResult
-from freecad_llm_agent.pipeline import DesignAgent, RenderReview
+from freecad_llm_agent.pipeline import DesignAgent, RenderReview, PipelineCancelledError
 
 
 class RecordingGenerator:
@@ -79,3 +81,17 @@ def test_failed_execution_feedback_is_shared_with_llm(tmp_path: Path):
     combined_feedback = "\n".join(second_context.previous_errors)
     assert "boom" in combined_feedback
     assert "line2" in combined_feedback, "Execution log should be included in feedback"
+
+
+def test_pipeline_respects_cancellation(tmp_path: Path):
+    config = AppConfig()
+    config.pipeline.workspace = tmp_path / "artifacts"
+    config.renderer.image_dir = config.pipeline.workspace / "renders"
+    agent = DesignAgent(config)
+    generator = RecordingGenerator(["print('first')"])
+    agent._generator = generator  # type: ignore[assignment]
+    agent._engine = FailingThenPassingEngine(config.pipeline.workspace)
+    agent._renderer = NoopRenderer()
+
+    with pytest.raises(PipelineCancelledError):
+        agent.run("Отмена после генерации", is_cancelled=lambda: bool(generator.contexts))
