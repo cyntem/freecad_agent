@@ -8,18 +8,30 @@ from typing import List, Sequence
 from .llm import LLMClient, Message
 
 
+@dataclass(frozen=True)
+class ExtensionInfo:
+    """Description of a FreeCAD workbench/extension available to the agent."""
+
+    name: str
+    version: str
+
+    def label(self) -> str:
+        version = self.version.strip()
+        return f"{self.name} (v{version})" if version else self.name
+
+
 @dataclass
 class EnvironmentInfo:
     """Metadata about the currently available FreeCAD installation."""
 
     freecad_version: str = "0.21"
-    workbenches: Sequence[str] = (
-        "Part",
-        "Sketcher",
-        "TechDraw",
-        "Assembly3",
-        "Assembly4",
-        "A2plus",
+    extensions: Sequence[ExtensionInfo] = (
+        ExtensionInfo("Part", "0.21"),
+        ExtensionInfo("Sketcher", "0.21"),
+        ExtensionInfo("TechDraw", "1.0"),
+        ExtensionInfo("Assembly3", "0.12"),
+        ExtensionInfo("Assembly4", "0.50"),
+        ExtensionInfo("A2plus", "0.4"),
     )
     notes: str = "Headless mode with automatic recompute"
 
@@ -61,13 +73,19 @@ class ScriptGenerator:
         return self._llm.complete(messages)
 
     def _build_user_prompt(self, context: ScriptGenerationContext) -> str:
+        extensions = list(context.environment.extensions)
+        extension_line = (
+            "Installed extensions: "
+            + (", ".join(extension.label() for extension in extensions) if extensions else "None")
+        )
+
         lines = [
             "=== DESIGN REQUIREMENT ===",
             context.requirement.strip(),
             "",
             "=== ENVIRONMENT ===",
             f"FreeCAD version: {context.environment.freecad_version}",
-            f"Installed workbenches: {', '.join(context.environment.workbenches)}",
+            extension_line,
             f"Notes: {context.environment.notes}",
             "",
         ]
@@ -105,4 +123,4 @@ class ScriptGenerator:
         return "\n".join(lines)
 
 
-__all__ = ["EnvironmentInfo", "ScriptGenerationContext", "ScriptGenerator"]
+__all__ = ["ExtensionInfo", "EnvironmentInfo", "ScriptGenerationContext", "ScriptGenerator"]
