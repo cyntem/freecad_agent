@@ -1,0 +1,12 @@
+freecad:
+  executable_path: /usr/bin/freecadcmd
+llm:
+  provider: dummy
+  model: gpt-4o-mini
+renderer:
+  image_dir: renders
+  width: 1024
+  height: 768
+pipeline:
+  max_iterations: 3
+  workspace: artifacts
