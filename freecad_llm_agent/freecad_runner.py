@@ -71,8 +71,9 @@ class FreeCADEngine:
 
         with _temporary_macro_copy(script_path, self._macro_directory) as installed_macro:
             execution_path = installed_macro or script_path
-
+            
             if self._embedded_runner:
+                print("Execute in :",execution_path)
                 return self._embedded_runner.execute(script_body, execution_path)
 
             if self._executable:
@@ -228,6 +229,11 @@ class _EmbeddedFreeCADRuntime:
     def _execute_internal(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
         buffer = io.StringIO()
         before_objects = self._capture_document_objects()
+
+        # ВАЖНО: задать имя модуля и путь к файлу
+        self._namespace.setdefault("__name__", "__main__")
+        self._namespace["__file__"] = str(script_path)
+
         try:
             self._ensure_project_document()
             compiled = compile(script_body, str(script_path), "exec")
