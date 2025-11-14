@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import traceback
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -45,6 +45,7 @@ class ScriptExecutionResult:
     script_path: Path
     output_log: List[str]
     error: Optional[str] = None
+    affected_objects: List[str] = field(default_factory=list)
 
 
 class FreeCADEngine:
@@ -105,6 +106,7 @@ class FreeCADEngine:
                 script_path=script_path,
                 output_log=["FreeCAD execution timed out"],
                 error="Execution timed out",
+                affected_objects=[],
             )
         except FileNotFoundError:
             logger.error("FreeCAD executable disappeared at runtime. Using simulation.")
@@ -119,7 +121,7 @@ class FreeCADEngine:
             error = f"FreeCAD exited with code {completed.returncode}"
         else:
             error = self._scan_for_errors(output_log)
-        return ScriptExecutionResult(error is None, script_path, output_log, error)
+        return ScriptExecutionResult(error is None, script_path, output_log, error, [])
 
     def _simulate_execution(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
         output_log: List[str] = [
@@ -129,9 +131,9 @@ class FreeCADEngine:
         if "raise" in script_body:
             error_msg = "Script contains explicit raise statement"
             logger.error(error_msg)
-            return ScriptExecutionResult(False, script_path, output_log, error_msg)
+            return ScriptExecutionResult(False, script_path, output_log, error_msg, [])
         output_log.append("[simulated] FreeCAD finished successfully")
-        return ScriptExecutionResult(True, script_path, output_log, None)
+        return ScriptExecutionResult(True, script_path, output_log, None, [])
 
     def _scan_for_errors(self, log_lines: List[str]) -> Optional[str]:
         joined = "\n".join(log_lines)
@@ -185,6 +187,7 @@ class _EmbeddedFreeCADRuntime:
 
     def _execute_internal(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
         buffer = io.StringIO()
+        before_objects = self._capture_document_objects()
         try:
             self._ensure_project_document()
             compiled = compile(script_body, str(script_path), "exec")
@@ -192,11 +195,13 @@ class _EmbeddedFreeCADRuntime:
                 exec(compiled, self._namespace)
             output_log = _split_lines(buffer.getvalue())
             self._refresh_gui_view()
-            return ScriptExecutionResult(True, script_path, output_log)
+            affected = self._calculate_affected_objects(before_objects)
+            return ScriptExecutionResult(True, script_path, output_log, None, affected)
         except Exception as exc:  # pragma: no cover - depends on FreeCAD runtime
             output_log = _split_lines(buffer.getvalue())
             output_log.extend(traceback.format_exc().splitlines())
-            return ScriptExecutionResult(False, script_path, output_log, str(exc))
+            affected = self._calculate_affected_objects(before_objects)
+            return ScriptExecutionResult(False, script_path, output_log, str(exc), affected)
 
     def _refresh_gui_view(self) -> None:
         if FreeCAD is not None:
@@ -247,6 +252,11 @@ class _EmbeddedFreeCADRuntime:
                 except Exception:  # pragma: no cover - FreeCAD specific
                     logger.debug("Failed to create persistent FreeCAD document", exc_info=True)
                     document = None
+        else:
+            try:
+                self._project_doc_name = document.Name
+            except Exception:  # pragma: no cover - FreeCAD specific
+                logger.debug("Failed to read active document name", exc_info=True)
         if document is None:
             return
         set_active = getattr(FreeCAD, "setActiveDocument", None)
@@ -281,6 +291,45 @@ class _EmbeddedFreeCADRuntime:
             gui_document = getattr(FreeCADGui, "ActiveDocument", None)
         if gui_document is not None:
             FreeCADGui.ActiveDocument = gui_document
+
+    def _capture_document_objects(self) -> Dict[str, str]:
+        objects: Dict[str, str] = {}
+        if FreeCAD is None:
+            return objects
+        document = getattr(FreeCAD, "ActiveDocument", None)
+        if document is None:
+            return objects
+        doc_objects = getattr(document, "Objects", None)
+        if doc_objects:
+            for obj in doc_objects:
+                name = getattr(obj, "Name", None)
+                label = getattr(obj, "Label", None)
+                if name:
+                    objects[name] = label or name
+        active_obj = getattr(document, "ActiveObject", None)
+        if active_obj is not None:
+            name = getattr(active_obj, "Name", None)
+            label = getattr(active_obj, "Label", None)
+            if name:
+                objects.setdefault(name, label or name)
+        return objects
+
+    def _calculate_affected_objects(self, before: Dict[str, str]) -> List[str]:
+        after = self._capture_document_objects()
+        new_objects = [label for name, label in after.items() if name not in before]
+        if new_objects:
+            return new_objects
+        # Fall back to the current active object if nothing new was created
+        if FreeCAD is not None:
+            document = getattr(FreeCAD, "ActiveDocument", None)
+            if document is not None:
+                active_obj = getattr(document, "ActiveObject", None)
+                if active_obj is not None:
+                    name = getattr(active_obj, "Name", None)
+                    label = getattr(active_obj, "Label", None)
+                    if name or label:
+                        return [label or name]
+        return []
 
 
 if QtCore is not None:
