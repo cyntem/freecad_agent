@@ -28,6 +28,14 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover - GUI might be unavailable
     FreeCADGui = None  # type: ignore
 
+try:  # pragma: no cover - optional dependency
+    from PySide6 import QtCore  # type: ignore
+except ImportError:  # pragma: no cover - fallback for FreeCAD 0.21
+    try:
+        from PySide2 import QtCore  # type: ignore
+    except ImportError:  # pragma: no cover - Qt bridge unavailable
+        QtCore = None  # type: ignore
+
 
 @dataclass
 class ScriptExecutionResult:
@@ -147,17 +155,35 @@ class _EmbeddedFreeCADRuntime:
     def __init__(self) -> None:
         self._namespace: Dict[str, object] = {}
         self._project_doc_name = "LLMAgentProject"
+        self._qt_executor: Optional["_QtMainThreadExecutor"] = None
+        if QtCore is not None:
+            try:
+                self._qt_executor = _QtMainThreadExecutor(self)
+            except Exception:  # pragma: no cover - depends on FreeCAD runtime
+                logger.debug("Failed to initialize Qt main-thread executor", exc_info=True)
 
     @classmethod
     def try_create(cls) -> Optional["_EmbeddedFreeCADRuntime"]:
         if FreeCAD is None:
             return None
-        if threading.current_thread() is not threading.main_thread():
-            logger.debug("Embedded FreeCAD runtime disabled outside the main thread")
-            return None
-        return cls()
+        if threading.current_thread() is threading.main_thread():
+            return cls()
+        if _QtMainThreadExecutor.is_available():
+            return cls()
+        logger.debug(
+            "Embedded FreeCAD runtime requires the main thread or a Qt event loop bridge."
+        )
+        return None
 
     def execute(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
+        if threading.current_thread() is threading.main_thread():
+            return self._execute_internal(script_body, script_path)
+        if self._qt_executor:
+            return self._qt_executor.execute(script_body, script_path)
+        logger.debug("Falling back to direct execution outside the main thread")
+        return self._execute_internal(script_body, script_path)
+
+    def _execute_internal(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
         buffer = io.StringIO()
         try:
             self._ensure_project_document()
@@ -256,5 +282,69 @@ class _EmbeddedFreeCADRuntime:
         if gui_document is not None:
             FreeCADGui.ActiveDocument = gui_document
 
+
+if QtCore is not None:
+
+    class _QtMainThreadExecutor(QtCore.QObject):  # type: ignore[misc]
+        """Runs embedded FreeCAD scripts on the GUI thread via Qt signals."""
+
+        _finished = QtCore.Signal(object)
+
+        def __init__(self, runtime: _EmbeddedFreeCADRuntime) -> None:
+            super().__init__()
+            self._runtime = runtime
+            app = QtCore.QCoreApplication.instance()
+            if app is None:
+                raise RuntimeError("Qt application instance is required for main-thread execution")
+            self.moveToThread(app.thread())
+
+        @staticmethod
+        def is_available() -> bool:
+            if QtCore is None:
+                return False
+            return QtCore.QCoreApplication.instance() is not None
+
+        @QtCore.Slot(str, str)
+        def _run_on_main_thread(self, script_body: str, script_path_str: str) -> None:
+            script_path = Path(script_path_str)
+            result = self._runtime._execute_internal(script_body, script_path)
+            self._finished.emit(result)
+
+        def execute(self, script_body: str, script_path: Path) -> ScriptExecutionResult:
+            loop = QtCore.QEventLoop()
+            result_container: List[ScriptExecutionResult] = []
+
+            def _handle(result: ScriptExecutionResult) -> None:
+                result_container.append(result)
+                loop.quit()
+
+            self._finished.connect(_handle)
+            try:
+                QtCore.QMetaObject.invokeMethod(
+                    self,
+                    "_run_on_main_thread",
+                    QtCore.Qt.QueuedConnection,
+                    QtCore.Q_ARG(str, script_body),
+                    QtCore.Q_ARG(str, str(script_path)),
+                )
+                exec_method = getattr(loop, "exec", None) or getattr(loop, "exec_", None)
+                if exec_method is None:  # pragma: no cover - Qt specific
+                    raise RuntimeError("Qt event loop does not provide an exec method")
+                exec_method()
+            finally:
+                self._finished.disconnect(_handle)
+
+            if not result_container:
+                raise RuntimeError("Qt bridge failed to return script execution result")
+            return result_container[0]
+
+else:
+
+    class _QtMainThreadExecutor:  # type: ignore[too-few-public-methods]
+        """Placeholder used when PySide is unavailable."""
+
+        @staticmethod
+        def is_available() -> bool:
+            return False
 
 __all__ = ["ScriptExecutionResult", "FreeCADEngine"]
