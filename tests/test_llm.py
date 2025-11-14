@@ -63,4 +63,7 @@ def test_fetch_openrouter_models(monkeypatch):
     monkeypatch.setattr(llm_module, "httpx", fake_httpx)
 
     models = fetch_openrouter_models("token")
-    assert models == ["model-a", "model-b"]
+    assert len(models) == 2
+    assert models[0].model_id == "model-a"
+    assert models[0].vendor == "unknown"
+    assert models[0].supports_images is None

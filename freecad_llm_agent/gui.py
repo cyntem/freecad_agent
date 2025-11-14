@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from .config import AppConfig, load_config
 from .pipeline import DesignAgent, PipelineReport
-from .llm import fetch_openrouter_models
+from .llm import OpenRouterModelInfo, fetch_openrouter_models
 
 try:  # pragma: no cover - the GUI is only exercised inside FreeCAD
     from PySide6 import QtCore, QtWidgets  # type: ignore
@@ -30,10 +30,12 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self.setObjectName("LLMAgentDockWidget")
         self.setWindowTitle("LLM агент для FreeCAD")
         self._config_path = config_path
+        self._settings = QtCore.QSettings("FreeCAD", "LLMAgent")
         self._worker_thread: Optional[QtCore.QThread] = None
         self._worker: Optional[_AgentWorker] = None
         self._model_thread: Optional[QtCore.QThread] = None
         self._model_worker: Optional[_ModelFetchWorker] = None
+        self._models_by_vendor: Dict[str, List[OpenRouterModelInfo]] = {}
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
@@ -67,6 +69,8 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         layout.addWidget(self._response_output)
 
         self.setWidget(container)
+        self._load_persistent_settings()
+        self._seed_default_models()
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -81,6 +85,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._api_key_edit = QtWidgets.QLineEdit()
         self._api_key_edit.setEchoMode(QtWidgets.QLineEdit.Password)
         self._api_key_edit.setPlaceholderText("sk-or-v1-...")
+        self._api_key_edit.editingFinished.connect(self._persist_api_key)
         layout.addWidget(QtWidgets.QLabel("API ключ:"), 0, 0)
         layout.addWidget(self._api_key_edit, 0, 1)
 
@@ -97,20 +102,23 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         layout.addWidget(QtWidgets.QLabel("X-Title:"), 3, 0)
         layout.addWidget(self._app_name_edit, 3, 1)
 
+        self._vendor_combo = QtWidgets.QComboBox()
+        self._vendor_combo.currentIndexChanged.connect(self._on_vendor_changed)
+        layout.addWidget(QtWidgets.QLabel("Производитель:"), 4, 0)
+        layout.addWidget(self._vendor_combo, 4, 1)
+
         self._model_combo = QtWidgets.QComboBox()
-        self._model_combo.addItems(
-            [
-                "gpt-4o-mini",
-                "anthropic/claude-3.5-sonnet",
-                "meta-llama/llama-3.1-70b-instruct",
-            ]
-        )
-        layout.addWidget(QtWidgets.QLabel("Модель:"), 4, 0)
-        layout.addWidget(self._model_combo, 4, 1)
+        self._model_combo.currentIndexChanged.connect(self._update_model_capabilities_hint)
+        layout.addWidget(QtWidgets.QLabel("Модель:"), 5, 0)
+        layout.addWidget(self._model_combo, 5, 1)
+
+        self._model_capabilities_label = QtWidgets.QLabel("Поддержка изображений: неизвестно")
+        self._model_capabilities_label.setObjectName("modelCapabilityHint")
+        layout.addWidget(self._model_capabilities_label, 6, 0, 1, 2)
 
         self._refresh_models_button = QtWidgets.QPushButton("Обновить список моделей")
         self._refresh_models_button.clicked.connect(self._refresh_models)
-        layout.addWidget(self._refresh_models_button, 5, 0, 1, 2)
+        layout.addWidget(self._refresh_models_button, 7, 0, 1, 2)
 
         hint = QtWidgets.QLabel(
             "Заполните ключ и, при необходимости, параметры Referer/X-Title \n"
@@ -118,7 +126,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666; font-size: 11px")
-        layout.addWidget(hint, 6, 0, 1, 2)
+        layout.addWidget(hint, 8, 0, 1, 2)
         return group
 
     # ------------------------------------------------------------------
@@ -156,6 +164,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         if not api_key:
             self._set_status("Укажите API ключ OpenRouter", error=True)
             return
+        self._persist_api_key()
         base = self._base_url_edit.text().strip() or None
         self._refresh_models_button.setEnabled(False)
         self._set_status("Загрузка списка моделей...")
@@ -184,14 +193,11 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._set_status("Ошибка", error=True)
         self._response_output.setPlainText(message)
 
-    def _handle_models_ready(self, models: list[str]) -> None:
+    def _handle_models_ready(self, models: List[OpenRouterModelInfo]) -> None:
         self._refresh_models_button.setEnabled(True)
-        self._set_status(f"Получено моделей: {len(models)}")
-        self._model_combo.clear()
-        if models:
-            self._model_combo.addItems(models)
-        else:
-            self._model_combo.addItem("gpt-4o-mini")
+        vendor_count = len({model.vendor for model in models})
+        self._set_status(f"Получено моделей: {len(models)} | производителей: {vendor_count}")
+        self._apply_model_metadata(models)
 
     def _handle_models_failed(self, message: str) -> None:
         self._refresh_models_button.setEnabled(True)
@@ -203,7 +209,12 @@ class AgentDockWidget(QtWidgets.QDockWidget):
     # ------------------------------------------------------------------
     def _collect_openrouter_overrides(self) -> Dict[str, Any]:
         api_key = self._api_key_edit.text().strip()
-        model = self._model_combo.currentText().strip()
+        model_info = self._model_combo.currentData()
+        if isinstance(model_info, OpenRouterModelInfo):
+            model = model_info.model_id
+        else:
+            selected_text = self._model_combo.currentText().strip()
+            model = selected_text if selected_text and self._model_combo.isEnabled() else ""
         if not api_key or not model:
             return {}
         base_url = self._base_url_edit.text().strip() or None
@@ -217,6 +228,97 @@ class AgentDockWidget(QtWidgets.QDockWidget):
             "openrouter_site_url": site_url,
             "openrouter_app_name": app_name,
         }
+
+    def _apply_model_metadata(self, models: List[OpenRouterModelInfo]) -> None:
+        if not models:
+            self._model_combo.clear()
+            self._vendor_combo.clear()
+            self._model_combo.addItem("Нет моделей")
+            self._vendor_combo.addItem("Неизвестно")
+            self._model_combo.setEnabled(False)
+            self._vendor_combo.setEnabled(False)
+            self._update_model_capabilities_hint()
+            return
+
+        self._model_combo.setEnabled(True)
+        self._vendor_combo.setEnabled(True)
+        grouped: Dict[str, List[OpenRouterModelInfo]] = {}
+        for model in models:
+            grouped.setdefault(model.vendor, []).append(model)
+        for vendor, items in grouped.items():
+            items.sort(key=lambda info: info.display_name.lower())
+        self._models_by_vendor = grouped
+        self._rebuild_vendor_combo()
+
+    def _rebuild_vendor_combo(self) -> None:
+        self._vendor_combo.blockSignals(True)
+        self._vendor_combo.clear()
+        for vendor in sorted(self._models_by_vendor.keys()):
+            label = vendor.replace("-", " ").title()
+            self._vendor_combo.addItem(label, vendor)
+        self._vendor_combo.blockSignals(False)
+        if self._models_by_vendor:
+            self._vendor_combo.setCurrentIndex(0)
+            self._populate_models_for_vendor(self._vendor_combo.currentData())
+        else:
+            self._model_combo.clear()
+            self._update_model_capabilities_hint()
+
+    def _populate_models_for_vendor(self, vendor_key: Optional[str]) -> None:
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        if vendor_key and vendor_key in self._models_by_vendor:
+            for model in self._models_by_vendor[vendor_key]:
+                self._model_combo.addItem(model.display_name, model)
+        self._model_combo.blockSignals(False)
+        self._update_model_capabilities_hint()
+
+    def _on_vendor_changed(self, index: int) -> None:  # pylint: disable=unused-argument
+        vendor_key = self._vendor_combo.currentData()
+        self._populate_models_for_vendor(vendor_key)
+
+    def _update_model_capabilities_hint(self, index: int = -1) -> None:  # pylint: disable=unused-argument
+        model_info = self._model_combo.currentData()
+        if isinstance(model_info, OpenRouterModelInfo):
+            if model_info.supports_images is True:
+                hint = "Поддержка изображений: есть"
+            elif model_info.supports_images is False:
+                hint = "Поддержка изображений: нет"
+            else:
+                hint = "Поддержка изображений: неизвестно"
+        else:
+            hint = "Поддержка изображений: неизвестно"
+        self._model_capabilities_label.setText(hint)
+
+    def _seed_default_models(self) -> None:
+        defaults = [
+            OpenRouterModelInfo("openai/gpt-4o-mini", "openai", "gpt-4o-mini", supports_images=True),
+            OpenRouterModelInfo(
+                "anthropic/claude-3.5-sonnet",
+                "anthropic",
+                "claude-3.5-sonnet",
+                supports_images=True,
+            ),
+            OpenRouterModelInfo(
+                "meta-llama/llama-3.1-70b-instruct",
+                "meta",
+                "llama-3.1-70b-instruct",
+                supports_images=False,
+            ),
+        ]
+        self._apply_model_metadata(defaults)
+
+    def _load_persistent_settings(self) -> None:
+        api_key = self._settings.value("openrouter/api_key")
+        if isinstance(api_key, str) and api_key:
+            self._api_key_edit.setText(api_key)
+
+    def _persist_api_key(self) -> None:
+        api_key = self._api_key_edit.text().strip()
+        if api_key:
+            self._settings.setValue("openrouter/api_key", api_key)
+        else:
+            self._settings.remove("openrouter/api_key")
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self._status_label.setText(text)
