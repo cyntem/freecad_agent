@@ -92,3 +92,21 @@ def test_embedded_runner_uses_gui_active_document(monkeypatch, tmp_path):
 
     assert freecad_stub.ActiveDocument is document
     assert freecad_stub.set_calls and freecad_stub.set_calls[-1] == document.Name
+
+
+def test_engine_discovers_snap_installation(monkeypatch, tmp_path):
+    import freecad_llm_agent.freecad_runner as runner
+
+    workspace = tmp_path / "workspace"
+    configured_path = tmp_path / "missing" / "freecadcmd"
+    snap_path = tmp_path / "snap" / "bin" / "freecadcmd"
+    snap_path.parent.mkdir(parents=True, exist_ok=True)
+    snap_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    monkeypatch.delenv("FREECAD_EXECUTABLE", raising=False)
+    monkeypatch.setenv("FREECAD_EXECUTABLE", str(snap_path))
+
+    config = FreeCADConfig(executable_path=configured_path)
+    engine = runner.FreeCADEngine(config, workspace)
+
+    assert engine._executable == str(snap_path)
