@@ -1,16 +1,16 @@
 # FreeCAD LLM Agent
 
-Автономный агент, который генерирует, исполняет и анализирует Python-скрипты для FreeCAD на основе текстового ТЗ.
+An autonomous agent that generates, runs, and analyzes Python scripts for FreeCAD from a textual specification.
 
-## Возможности
-- Принимает текстовое задание и строит по нему Python-скрипт для FreeCAD с помощью LLM (поддерживаются провайдеры OpenAI, Azure OpenAI, OpenRouter и локальные OpenAI-совместимые API).
-- Сохраняет макросы, журналы выполнения и дополнительные артефакты по каждой итерации.
-- Запускает реальный `freecadcmd`, собирает stdout/stderr и анализирует журналы для поиска ошибок.
-- Создаёт рендеры (PNG) и передаёт их в LLM с поддержкой изображений для автоматического запроса дополнительных проекций.
-- Промпты учитывают требования к сборкам: импорт через Assembly3/Assembly4/A2plus и управление зависимостями деталей.
-- В составе расширения FreeCAD доступна док-панель с текстовым вводом/выводом и настройками OpenRouter, умеющая подгружать полный список моделей.
+## Capabilities
+- Consumes a text brief and produces a FreeCAD Python script with the help of an LLM (supports OpenAI, Azure OpenAI, OpenRouter, and self-hosted OpenAI-compatible APIs).
+- Saves macros, execution logs, and additional artifacts for every iteration.
+- Launches the real `freecadcmd`, captures stdout/stderr, and inspects logs to detect errors.
+- Produces renders (PNG) and passes them to a multimodal LLM to automatically request extra projections.
+- Prompt templates cover assembly requirements: importing through Assembly3/Assembly4/A2plus and managing part dependencies.
+- Ships with a FreeCAD extension that adds a dock widget with text input/output and OpenRouter settings capable of loading the full model list.
 
-## Структура проекта
+## Project structure
 ```
 freecad_llm_agent/
   config.py            # Конфигурация и загрузка YAML/JSON
@@ -25,19 +25,19 @@ scripts/install_linux.sh
 scripts/install_windows.ps1
 ```
 
-## Установка зависимостей
+## Installing dependencies
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Для базовой установки FreeCAD и Python можно воспользоваться скриптами в `scripts/`:
+For a baseline installation of FreeCAD and Python you can use the helper scripts in `scripts/`:
 - Linux: `scripts/install_linux.sh` (apt)
 - Windows: `scripts/install_windows.ps1` (choco)
 
-## Конфигурация
-Создайте `config.yml` (пример):
+## Configuration
+Create a `config.yml` (example):
 ```yaml
 freecad:
   executable_path: /usr/bin/freecadcmd
@@ -48,33 +48,44 @@ pipeline:
   max_iterations: 3
 ```
 
-Все пути в конфиге нормализуются относительно рабочей директории. При отсутствии файла используются значения по умолчанию.
+All paths in the config are normalized relative to the working directory. Default values are used when the file is missing.
 
-## Использование
+## Usage
 ```bash
 python main.py "Создать корпус редуктора с посадочными местами"
 ```
-или
+or
 ```bash
 python main.py requirement.txt --is-file
 ```
 
-В результате CLI вернёт JSON cо списком итераций и путями к сгенерированным скриптам/рендерам в каталоге `artifacts/`.
+The CLI returns JSON with the list of iterations and paths to the generated scripts/renders inside the `artifacts/` directory.
 
-## Расширение FreeCAD и графический интерфейс
-1. Скопируйте (или создайте симлинк) репозитория в каталог `Mod` вашей установки FreeCAD.
-2. Запустите FreeCAD ≥0.21 и выберите рабочую среду **LLM Agent**. При активации появится док-панель с полем ввода задания, окном вывода и блоком настроек OpenRouter.
-3. Для подключения OpenRouter укажите API-ключ и при необходимости `HTTP-Referer` (URL вашего приложения) и `X-Title` (название интеграции). Кнопка «Обновить список моделей» вызывает API `/models` и позволяет выбрать любую доступную модель.
-4. Введите текстовое ТЗ и нажмите «Запустить агента». Выполнение идёт в фоне, статус отображается внутри панели, а ответы выводятся в формате JSON. При отсутствии ключа OpenRouter используются настройки `config.yml` (например, локальные модели или OpenAI/Azure).
+## Installing the FreeCAD extension
+1. Clone or download this repository.
+2. Locate the FreeCAD `Mod` directory:
+   - Linux: `~/.local/share/FreeCAD/Mod`
+   - macOS: `~/Library/Preferences/FreeCAD/Mod`
+   - Windows: `%APPDATA%/FreeCAD/Mod`
+3. Copy the repository (or create a symlink) into that `Mod` folder, e.g. `ln -s /path/to/freecad_agent ~/.local/share/FreeCAD/Mod/LLMAgent` on Linux.
+4. Restart FreeCAD so it picks up the new workbench.
+5. Open **Tools → Addon manager** (optional) and verify that the **LLM Agent** workbench is listed.
 
-## Тестирование
-В качестве smoke-теста можно запустить:
+After these steps the extension becomes available in the FreeCAD UI.
+
+## FreeCAD extension and graphical interface
+1. Launch FreeCAD ≥0.21 and switch to the **LLM Agent** workbench. The dock widget provides a task input field, an output log, and OpenRouter settings.
+2. To connect to OpenRouter, supply your API key and, if needed, `HTTP-Referer` (your application URL) plus `X-Title` (integration name). The **Refresh model list** button calls the `/models` API and lets you choose any available model.
+3. Enter a textual requirement and press **Run agent**. Execution happens in the background, the status is shown in the dock, and responses are printed as JSON. If no OpenRouter key is provided, the extension falls back to `config.yml` settings (e.g., local models or OpenAI/Azure).
+
+## Testing
+As a smoke test you can run:
 ```bash
 python -m pytest
 ```
-(см. тесты в каталоге `tests/`).
+(see the tests inside the `tests/` directory).
 
-## Дальнейшее развитие
-- Интеграция с системами управления данными изделия (PDM/PLM).
-- Экспорт результатов в форматы STEP/TechDraw.
-- Улучшение диагностики качества сетки и столкновений.
+## Future work
+- Integrate with product data management systems (PDM/PLM).
+- Export results to STEP/TechDraw formats.
+- Improve mesh quality diagnostics and collision checks.
