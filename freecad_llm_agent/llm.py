@@ -192,6 +192,9 @@ class OpenAILLMClient(_BaseHTTPChatClient):
         temperature: float,
         api_base: Optional[str] = None,
         organization: Optional[str] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_backoff: float = 1.0,
     ) -> None:
         headers = {"Authorization": f"Bearer {api_key}"}
         if organization:
@@ -202,6 +205,9 @@ class OpenAILLMClient(_BaseHTTPChatClient):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
 
 
@@ -216,6 +222,9 @@ class AzureOpenAILLMClient(_BaseHTTPChatClient):
         api_version: str,
         max_tokens: int,
         temperature: float,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_backoff: float = 1.0,
     ) -> None:
         if not endpoint.endswith("/"):
             endpoint = endpoint + "/"
@@ -228,6 +237,9 @@ class AzureOpenAILLMClient(_BaseHTTPChatClient):
             max_tokens=max_tokens,
             temperature=temperature,
             path=path,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
 
 
@@ -241,6 +253,9 @@ class LocalLLMClient(_BaseHTTPChatClient):
         max_tokens: int,
         temperature: float,
         headers: Optional[dict[str, str]] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_backoff: float = 1.0,
     ) -> None:
         if not endpoint:
             raise ValueError("Local endpoint URL must be provided for the 'local' provider")
@@ -250,6 +265,9 @@ class LocalLLMClient(_BaseHTTPChatClient):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
 
 
@@ -265,6 +283,9 @@ class OpenRouterLLMClient(_BaseHTTPChatClient):
         api_base: Optional[str] = None,
         site_url: Optional[str] = None,
         app_name: Optional[str] = None,
+        timeout: float = 60.0,
+        max_retries: int = 3,
+        retry_backoff: float = 1.0,
     ) -> None:
         headers = {"Authorization": f"Bearer {api_key}"}
         if site_url:
@@ -277,6 +298,9 @@ class OpenRouterLLMClient(_BaseHTTPChatClient):
             model=model,
             max_tokens=max_tokens,
             temperature=temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
 
 
@@ -313,6 +337,9 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
     """Return an ``LLMClient`` based on the provided configuration."""
 
     provider = config.provider.lower()
+    timeout = config.request_timeout
+    max_retries = config.max_retries
+    retry_backoff = config.retry_backoff
     if provider == "openai":
         if not config.api_key:
             raise RuntimeError("OpenAI provider requires api_key")
@@ -323,6 +350,9 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
             organization=config.organization,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
     if provider == "azure":
         if not (config.api_key and config.azure_endpoint and config.azure_deployment):
@@ -334,6 +364,9 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
             api_version=config.azure_api_version,
             max_tokens=config.max_tokens,
             temperature=config.temperature,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
     if provider == "local":
         if not config.local_endpoint:
@@ -344,6 +377,9 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
             max_tokens=config.max_tokens,
             temperature=config.temperature,
             headers=config.local_headers,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
     if provider == "openrouter":
         if not config.api_key:
@@ -356,6 +392,9 @@ def create_llm_client(config: "LLMConfig") -> LLMClient:
             api_base=config.openrouter_api_base,
             site_url=config.openrouter_site_url,
             app_name=config.openrouter_app_name,
+            timeout=timeout,
+            max_retries=max_retries,
+            retry_backoff=retry_backoff,
         )
 
     return DummyLLMClient(model=config.model, temperature=config.temperature)

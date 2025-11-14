@@ -3,6 +3,9 @@ freecad:
 llm:
   provider: dummy
   model: gpt-4o-mini
+  request_timeout: 60
+  max_retries: 3
+  retry_backoff: 1.0
 renderer:
   image_dir: renders
   width: 1024
