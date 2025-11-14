@@ -42,6 +42,9 @@ class LLMConfig:
     local_headers: Dict[str, str] = field(default_factory=dict)
     max_tokens: int = 2048
     temperature: float = 0.1
+    request_timeout: float = 60.0
+    max_retries: int = 3
+    retry_backoff: float = 1.0
 
 
 @dataclass

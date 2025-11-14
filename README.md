@@ -50,6 +50,19 @@ pipeline:
 
 All paths in the config are normalized relative to the working directory. Default values are used when the file is missing.
 
+LLM providers accept additional knobs inside the `llm` block to cope with rate limits:
+
+```yaml
+llm:
+  provider: openrouter
+  api_key: sk-...
+  request_timeout: 120  # seconds per HTTP call
+  max_retries: 5        # number of attempts per request
+  retry_backoff: 2.0    # exponential backoff multiplier when Retry-After is absent
+```
+
+Increasing the retry budget is helpful when OpenRouter returns HTTP 429 responses (Too Many Requests).
+
 ## Usage
 ```bash
 python main.py "Создать корпус редуктора с посадочными местами"

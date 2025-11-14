@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import httpx
 
+import pytest
+
 from freecad_llm_agent import llm as llm_module
 from freecad_llm_agent.config import LLMConfig
 from freecad_llm_agent.llm import Message, OpenRouterLLMClient, create_llm_client, fetch_openrouter_models
@@ -29,7 +31,14 @@ def test_create_llm_client_openrouter(monkeypatch):
 
     monkeypatch.setattr(llm_module.httpx, "Client", DummyClient)
 
-    config = LLMConfig(provider="openrouter", api_key="token", model="openrouter/model", max_tokens=128, temperature=0.3)
+    config = LLMConfig(
+        provider="openrouter",
+        api_key="token",
+        model="openrouter/model",
+        max_tokens=128,
+        temperature=0.3,
+        request_timeout=90.0,
+    )
     client = create_llm_client(config)
     client.complete([Message(role="user", content="test")])
 
@@ -39,6 +48,7 @@ def test_create_llm_client_openrouter(monkeypatch):
     assert isinstance(headers, dict)
     assert headers["Authorization"] == "Bearer token"
     assert captured["payload"]["model"] == "openrouter/model"
+    assert captured["timeout"] == pytest.approx(90.0)
 
 
 def test_fetch_openrouter_models(monkeypatch):
@@ -113,3 +123,49 @@ def test_openrouter_client_retries_on_rate_limit(monkeypatch):
     assert result == "second attempt"
     assert attempts["count"] == 2
     assert sleeps and sleeps[0] >= 0.1
+
+
+def test_openrouter_retry_settings_are_configurable(monkeypatch):
+    attempts = 0
+    sleeps: list[float] = []
+
+    class DummyClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def post(self, path: str, json: dict) -> object:
+            nonlocal attempts
+            attempts += 1
+            request = httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")
+            response = httpx.Response(429, request=request)
+
+            class ErrorResponse:
+                headers: dict[str, str] = {}
+
+                def raise_for_status(self) -> None:
+                    raise httpx.HTTPStatusError("429", request=request, response=response)
+
+                def json(self) -> dict:
+                    return {}
+
+            return ErrorResponse()
+
+    monkeypatch.setattr(llm_module.httpx, "Client", DummyClient)
+    monkeypatch.setattr(llm_module.time, "sleep", lambda delay: sleeps.append(delay))
+
+    config = LLMConfig(
+        provider="openrouter",
+        api_key="token",
+        model="model",
+        max_tokens=32,
+        temperature=0.1,
+        max_retries=4,
+        retry_backoff=0.5,
+    )
+    client = create_llm_client(config)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        client.complete([Message(role="user", content="fail")])
+
+    assert attempts == 4  # includes initial attempt
+    assert sleeps == [0.5, 1.0, 2.0]
