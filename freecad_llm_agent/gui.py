@@ -37,6 +37,9 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._model_thread: Optional[QtCore.QThread] = None
         self._model_worker: Optional[_ModelFetchWorker] = None
         self._models_by_vendor: Dict[str, List[OpenRouterModelInfo]] = {}
+        self._pending_vendor_key: Optional[str] = None
+        self._pending_model_id: Optional[str] = None
+        self._suspend_selection_persistence = True
         self._artifact_data: List[Dict[str, Any]] = []
         self._success_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton)
         self._failure_icon = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxCritical)
@@ -109,6 +112,8 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._load_persistent_settings()
         self._seed_default_models()
         self._load_iteration_default()
+        self._suspend_selection_persistence = False
+        self._attempt_initial_model_refresh()
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -146,7 +151,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         layout.addWidget(self._vendor_combo, 4, 1)
 
         self._model_combo = QtWidgets.QComboBox()
-        self._model_combo.currentIndexChanged.connect(self._update_model_capabilities_hint)
+        self._model_combo.currentIndexChanged.connect(self._on_model_changed)
         layout.addWidget(QtWidgets.QLabel("Модель:"), 5, 0)
         layout.addWidget(self._model_combo, 5, 1)
 
@@ -296,34 +301,68 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         for vendor, items in grouped.items():
             items.sort(key=lambda info: info.display_name.lower())
         self._models_by_vendor = grouped
-        self._rebuild_vendor_combo()
+        self._rebuild_vendor_combo(self._pending_vendor_key, self._pending_model_id)
 
-    def _rebuild_vendor_combo(self) -> None:
+    def _rebuild_vendor_combo(
+        self,
+        preferred_vendor: Optional[str] = None,
+        preferred_model: Optional[str] = None,
+    ) -> None:
         self._vendor_combo.blockSignals(True)
         self._vendor_combo.clear()
         for vendor in sorted(self._models_by_vendor.keys()):
             label = vendor.replace("-", " ").title()
             self._vendor_combo.addItem(label, vendor)
         self._vendor_combo.blockSignals(False)
-        if self._models_by_vendor:
-            self._vendor_combo.setCurrentIndex(0)
-            self._populate_models_for_vendor(self._vendor_combo.currentData())
+        if not self._models_by_vendor:
+            self._model_combo.clear()
+            self._update_model_capabilities_hint()
+            return
+
+        target_index: Optional[int] = None
+        if preferred_vendor:
+            for idx in range(self._vendor_combo.count()):
+                if self._vendor_combo.itemData(idx) == preferred_vendor:
+                    target_index = idx
+                    break
+        if target_index is None and self._vendor_combo.count():
+            target_index = 0
+        if target_index is not None:
+            self._vendor_combo.setCurrentIndex(target_index)
+            vendor_key = self._vendor_combo.itemData(target_index)
+            preferred_model_id = preferred_model if preferred_vendor == vendor_key else None
+            self._populate_models_for_vendor(vendor_key, preferred_model_id)
         else:
             self._model_combo.clear()
             self._update_model_capabilities_hint()
 
-    def _populate_models_for_vendor(self, vendor_key: Optional[str]) -> None:
+    def _populate_models_for_vendor(
+        self, vendor_key: Optional[str], preferred_model_id: Optional[str] = None
+    ) -> None:
         self._model_combo.blockSignals(True)
         self._model_combo.clear()
+        target_index: Optional[int] = None
         if vendor_key and vendor_key in self._models_by_vendor:
-            for model in self._models_by_vendor[vendor_key]:
+            for idx, model in enumerate(self._models_by_vendor[vendor_key]):
                 self._model_combo.addItem(model.display_name, model)
+                if preferred_model_id and model.model_id == preferred_model_id:
+                    target_index = idx
         self._model_combo.blockSignals(False)
-        self._update_model_capabilities_hint()
+        if target_index is not None:
+            self._model_combo.setCurrentIndex(target_index)
+        elif self._model_combo.count():
+            self._model_combo.setCurrentIndex(0)
+        else:
+            self._update_model_capabilities_hint()
 
     def _on_vendor_changed(self, index: int) -> None:  # pylint: disable=unused-argument
         vendor_key = self._vendor_combo.currentData()
         self._populate_models_for_vendor(vendor_key)
+        self._persist_selected_vendor(vendor_key)
+
+    def _on_model_changed(self, index: int = -1) -> None:  # pylint: disable=unused-argument
+        self._update_model_capabilities_hint()
+        self._persist_selected_model()
 
     def _update_model_capabilities_hint(self, index: int = -1) -> None:  # pylint: disable=unused-argument
         model_info = self._model_combo.currentData()
@@ -360,6 +399,12 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         api_key = self._settings.value("openrouter/api_key")
         if isinstance(api_key, str) and api_key:
             self._api_key_edit.setText(api_key)
+        vendor = self._settings.value("openrouter/vendor")
+        if isinstance(vendor, str) and vendor:
+            self._pending_vendor_key = vendor
+        model_id = self._settings.value("openrouter/model_id")
+        if isinstance(model_id, str) and model_id:
+            self._pending_model_id = model_id
 
     def _load_iteration_default(self) -> None:
         stored = self._settings.value("pipeline/max_iterations")
@@ -391,6 +436,36 @@ class AgentDockWidget(QtWidgets.QDockWidget):
             self._settings.setValue("openrouter/api_key", api_key)
         else:
             self._settings.remove("openrouter/api_key")
+
+    def _persist_selected_vendor(self, vendor_key: Optional[str]) -> None:
+        if self._suspend_selection_persistence:
+            return
+        if isinstance(vendor_key, str) and vendor_key:
+            self._pending_vendor_key = vendor_key
+            self._settings.setValue("openrouter/vendor", vendor_key)
+        else:
+            self._pending_vendor_key = None
+            self._settings.remove("openrouter/vendor")
+
+    def _persist_selected_model(self) -> None:
+        if self._suspend_selection_persistence:
+            return
+        model_info = self._model_combo.currentData()
+        if isinstance(model_info, OpenRouterModelInfo):
+            self._pending_model_id = model_info.model_id
+            self._settings.setValue("openrouter/model_id", model_info.model_id)
+            vendor_key = self._vendor_combo.currentData()
+            if isinstance(vendor_key, str):
+                self._persist_selected_vendor(vendor_key)
+        else:
+            self._settings.remove("openrouter/model_id")
+            self._pending_model_id = None
+
+    def _attempt_initial_model_refresh(self) -> None:
+        api_key = self._api_key_edit.text().strip()
+        if not api_key:
+            return
+        self._refresh_models()
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self._status_label.setText(text)
