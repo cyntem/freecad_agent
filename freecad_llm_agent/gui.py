@@ -36,6 +36,9 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._model_thread: Optional[QtCore.QThread] = None
         self._model_worker: Optional[_ModelFetchWorker] = None
         self._models_by_vendor: Dict[str, List[OpenRouterModelInfo]] = {}
+        self._artifact_data: List[Dict[str, Any]] = []
+        self._success_icon = self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton)
+        self._failure_icon = self.style().standardIcon(QtWidgets.QStyle.SP_MessageBoxCritical)
 
         container = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(container)
@@ -49,6 +52,15 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._requirement_input = QtWidgets.QTextEdit()
         self._requirement_input.setPlaceholderText("Опишите деталь или сборку для генерации...")
         layout.addWidget(self._requirement_input)
+
+        iteration_layout = QtWidgets.QHBoxLayout()
+        iteration_layout.addWidget(QtWidgets.QLabel("Максимум итераций:"))
+        self._iteration_spin = QtWidgets.QSpinBox()
+        self._iteration_spin.setRange(1, 10)
+        self._iteration_spin.valueChanged.connect(self._persist_iteration_count)
+        iteration_layout.addWidget(self._iteration_spin)
+        iteration_layout.addStretch()
+        layout.addLayout(iteration_layout)
 
         buttons_layout = QtWidgets.QHBoxLayout()
         self._status_label = QtWidgets.QLabel("Готов к запуску")
@@ -68,9 +80,24 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._response_output.setReadOnly(True)
         layout.addWidget(self._response_output)
 
+        layout.addWidget(QtWidgets.QLabel("Сгенерированные макросы:"))
+        scripts_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        self._artifact_list = QtWidgets.QListWidget()
+        self._artifact_list.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        self._artifact_list.itemSelectionChanged.connect(self._display_selected_artifact)
+        scripts_splitter.addWidget(self._artifact_list)
+        self._script_preview = QtWidgets.QPlainTextEdit()
+        self._script_preview.setReadOnly(True)
+        self._script_preview.setPlaceholderText("Выберите макрос для просмотра кода")
+        scripts_splitter.addWidget(self._script_preview)
+        scripts_splitter.setStretchFactor(0, 1)
+        scripts_splitter.setStretchFactor(1, 2)
+        layout.addWidget(scripts_splitter)
+
         self.setWidget(container)
         self._load_persistent_settings()
         self._seed_default_models()
+        self._load_iteration_default()
 
     # ------------------------------------------------------------------
     # UI helpers
@@ -136,6 +163,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._requirement_input.clear()
         self._response_output.clear()
         self._set_status("Готов к запуску")
+        self._clear_artifacts()
 
     def _start_agent_run(self) -> None:
         requirement = self._requirement_input.toPlainText().strip()
@@ -147,9 +175,16 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._set_status("Выполняется...", error=False)
         self._run_button.setEnabled(False)
         self._response_output.clear()
+        self._clear_artifacts()
+        self._persist_iteration_count()
 
         self._worker_thread = QtCore.QThread(self)
-        self._worker = _AgentWorker(requirement, self._config_path, overrides)
+        self._worker = _AgentWorker(
+            requirement,
+            self._config_path,
+            overrides,
+            self._iteration_spin.value(),
+        )
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._handle_run_success)
@@ -187,11 +222,13 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._run_button.setEnabled(True)
         self._set_status("Готово")
         self._response_output.setPlainText(json.dumps(summary, ensure_ascii=False, indent=2))
+        self._update_artifact_list(summary)
 
     def _handle_run_failure(self, message: str) -> None:
         self._run_button.setEnabled(True)
         self._set_status("Ошибка", error=True)
         self._response_output.setPlainText(message)
+        self._clear_artifacts()
 
     def _handle_models_ready(self, models: List[OpenRouterModelInfo]) -> None:
         self._refresh_models_button.setEnabled(True)
@@ -313,6 +350,30 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         if isinstance(api_key, str) and api_key:
             self._api_key_edit.setText(api_key)
 
+    def _load_iteration_default(self) -> None:
+        stored = self._settings.value("pipeline/max_iterations")
+        value: Optional[int] = None
+        if isinstance(stored, int):
+            value = stored
+        elif isinstance(stored, str):
+            try:
+                value = int(stored)
+            except ValueError:
+                value = None
+        if value is None:
+            value = self._read_iterations_from_config()
+        self._iteration_spin.setValue(max(1, min(20, value)))
+
+    def _persist_iteration_count(self) -> None:
+        self._settings.setValue("pipeline/max_iterations", self._iteration_spin.value())
+
+    def _read_iterations_from_config(self) -> int:
+        try:
+            config = load_config(self._config_path)
+            return config.pipeline.max_iterations
+        except Exception:  # pragma: no cover - loading config is best-effort
+            return 3
+
     def _persist_api_key(self) -> None:
         api_key = self._api_key_edit.text().strip()
         if api_key:
@@ -323,6 +384,70 @@ class AgentDockWidget(QtWidgets.QDockWidget):
     def _set_status(self, text: str, error: bool = False) -> None:
         self._status_label.setText(text)
         self._status_label.setStyleSheet("color: red" if error else "")
+
+    def _clear_artifacts(self) -> None:
+        self._artifact_data = []
+        self._artifact_list.clear()
+        self._script_preview.clear()
+
+    def _update_artifact_list(self, summary: Dict[str, Any]) -> None:
+        artifacts = summary.get("artifacts") if isinstance(summary, dict) else None
+        if not isinstance(artifacts, list):
+            self._clear_artifacts()
+            return
+        self._artifact_list.clear()
+        self._artifact_data = artifacts
+        for artifact in artifacts:
+            script_path = artifact.get("script", "")
+            iteration = artifact.get("iteration", "?")
+            objects = artifact.get("affected_objects") or []
+            if objects:
+                object_text = ", ".join(objects)
+            else:
+                object_text = "Объекты не обнаружены"
+            file_name = Path(script_path).name if script_path else "<неизвестно>"
+            item_text = f"Итерация {iteration}: {file_name} — {object_text}"
+            item = QtWidgets.QListWidgetItem(item_text)
+            icon = self._success_icon if artifact.get("success") else self._failure_icon
+            item.setIcon(icon)
+            if artifact.get("error"):
+                item.setToolTip(str(artifact.get("error")))
+            item.setData(QtCore.Qt.UserRole, artifact)
+            self._artifact_list.addItem(item)
+        if artifacts:
+            self._artifact_list.setCurrentRow(len(artifacts) - 1)
+
+    def _display_selected_artifact(self) -> None:
+        item = self._artifact_list.currentItem()
+        if not item:
+            self._script_preview.clear()
+            return
+        artifact = item.data(QtCore.Qt.UserRole) or {}
+        script_body = artifact.get("script_body") or ""
+        if not script_body:
+            script_path = artifact.get("script")
+            if script_path:
+                try:
+                    script_body = Path(script_path).read_text(encoding="utf-8")
+                except OSError as exc:
+                    script_body = f"# Не удалось загрузить файл: {exc}"
+        header_lines = []
+        iteration = artifact.get("iteration")
+        if iteration is not None:
+            header_lines.append(f"# Итерация: {iteration}")
+        script_path = artifact.get("script")
+        if script_path:
+            header_lines.append(f"# Файл: {script_path}")
+        objects = artifact.get("affected_objects") or []
+        if objects:
+            header_lines.append("# Объекты: " + ", ".join(objects))
+        error = artifact.get("error")
+        if error:
+            header_lines.append("# Ошибка: " + str(error))
+        header = "\n".join(header_lines)
+        if header:
+            header += "\n\n"
+        self._script_preview.setPlainText(f"{header}{script_body}".strip())
 
     def _cleanup_worker(self) -> None:
         if self._worker:
@@ -352,17 +477,21 @@ class _AgentWorker(QtCore.QObject):
         requirement: str,
         config_path: Optional[Path],
         llm_overrides: Optional[Dict[str, Any]] = None,
+        iteration_limit: Optional[int] = None,
     ) -> None:
         super().__init__()
         self._requirement = requirement
         self._config_path = config_path
         self._llm_overrides = llm_overrides or {}
+        self._iteration_limit = iteration_limit
 
     @QtCore.Slot()
     def run(self) -> None:
         try:
             config = load_config(self._config_path)
             self._apply_llm_overrides(config)
+            if isinstance(self._iteration_limit, int) and self._iteration_limit > 0:
+                config.pipeline.max_iterations = self._iteration_limit
             agent = DesignAgent(config)
             report = agent.run(self._requirement)
             self.finished.emit(_report_to_summary(report))
@@ -406,11 +535,13 @@ def _report_to_summary(report: PipelineReport) -> Dict[str, Any]:
             {
                 "iteration": artifact.iteration,
                 "script": str(artifact.script_path),
+                "script_body": artifact.script_body,
                 "renders": [str(path) for path in artifact.render_paths],
                 "success": artifact.success,
                 "error": artifact.error,
                 "render_feedback": artifact.render_feedback,
                 "output_log": artifact.output_log,
+                "affected_objects": artifact.affected_objects,
             }
         )
     return {"success": report.successful, "artifacts": artifacts, "requirement": report.requirement}

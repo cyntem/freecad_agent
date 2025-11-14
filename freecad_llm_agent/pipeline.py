@@ -27,6 +27,7 @@ class IterationArtifact:
     success: bool
     error: Optional[str] = None
     render_feedback: Optional[str] = None
+    affected_objects: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -96,6 +97,7 @@ class DesignAgent:
                 success=execution.success,
                 error=execution.error,
                 render_feedback=review.feedback,
+                affected_objects=execution.affected_objects,
             )
             report.artifacts.append(artifact)
 
