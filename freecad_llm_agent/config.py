@@ -32,6 +32,9 @@ class LLMConfig:
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     organization: Optional[str] = None
+    openrouter_api_base: Optional[str] = None
+    openrouter_site_url: Optional[str] = None
+    openrouter_app_name: Optional[str] = None
     azure_endpoint: Optional[str] = None
     azure_deployment: Optional[str] = None
     azure_api_version: str = "2024-02-01"
