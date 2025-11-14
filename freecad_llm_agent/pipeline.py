@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 from .config import AppConfig
 from .freecad_runner import FreeCADEngine
@@ -106,8 +106,7 @@ class DesignAgent:
                 break
 
             logger.warning("Iteration %s failed: %s", iteration, execution.error)
-            if execution.error:
-                errors.append(execution.error)
+            errors.append(self._format_execution_feedback(iteration, execution))
 
         return report
 
@@ -159,8 +158,26 @@ class DesignAgent:
         except json.JSONDecodeError:
             lowered = response.lower()
             needs_more = "additional" in lowered or "extra view" in lowered
-            feedback = response.strip() or "Render review response received"
-            return RenderReview(feedback=feedback, needs_additional_views=needs_more)
+        feedback = response.strip() or "Render review response received"
+        return RenderReview(feedback=feedback, needs_additional_views=needs_more)
+
+    def _format_execution_feedback(self, iteration: int, execution: "ScriptExecutionResult") -> str:
+        lines = [f"Iteration {iteration} FreeCAD execution failed."]
+        if execution.error:
+            lines.append(f"Error: {execution.error}")
+        if execution.output_log:
+            lines.append("Recent FreeCAD output:")
+            lines.extend(self._tail_lines(execution.output_log))
+        if not execution.error and not execution.output_log:
+            lines.append("No output was captured before the failure.")
+        return "\n".join(lines)
+
+    def _tail_lines(self, log_lines: Sequence[str], limit: int = 40) -> List[str]:
+        lines = list(log_lines)
+        if len(lines) <= limit:
+            return lines
+        truncated = len(lines) - limit
+        return [f"... truncated {truncated} earlier lines ...", *lines[-limit:]]
 
 
 __all__ = ["DesignAgent", "PipelineReport", "IterationArtifact", "RenderReview"]
