@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import threading
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
 from .config import AppConfig, load_config
-from .pipeline import DesignAgent, PipelineReport
+from .pipeline import DesignAgent, PipelineReport, PipelineCancelledError
 from .llm import OpenRouterModelInfo, fetch_openrouter_models
 from .freecad_runner import FreeCADEngine
 
@@ -34,6 +35,7 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._settings = QtCore.QSettings("FreeCAD", "LLMAgent")
         self._worker_thread: Optional[QtCore.QThread] = None
         self._worker: Optional[_AgentWorker] = None
+        self._cancel_event: Optional[threading.Event] = None
         self._model_thread: Optional[QtCore.QThread] = None
         self._model_worker: Optional[_ModelFetchWorker] = None
         self._models_by_vendor: Dict[str, List[OpenRouterModelInfo]] = {}
@@ -76,6 +78,10 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         self._run_button = QtWidgets.QPushButton("Запустить агента")
         self._run_button.clicked.connect(self._start_agent_run)
         buttons_layout.addWidget(self._run_button)
+        self._cancel_button = QtWidgets.QPushButton("Отменить запрос")
+        self._cancel_button.setEnabled(False)
+        self._cancel_button.clicked.connect(self._cancel_agent_run)
+        buttons_layout.addWidget(self._cancel_button)
         clear_button = QtWidgets.QPushButton("Очистить")
         clear_button.clicked.connect(self._clear_texts)
         buttons_layout.addWidget(clear_button)
@@ -190,25 +196,36 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         overrides = self._collect_openrouter_overrides()
         self._set_status("Выполняется...", error=False)
         self._run_button.setEnabled(False)
+        self._cancel_button.setEnabled(True)
         self._response_output.clear()
         self._clear_artifacts()
         self._persist_iteration_count()
 
+        self._cancel_event = threading.Event()
         self._worker_thread = QtCore.QThread(self)
         self._worker = _AgentWorker(
             requirement,
             self._config_path,
             overrides,
             self._iteration_spin.value(),
+            self._cancel_event,
         )
         self._worker.moveToThread(self._worker_thread)
         self._worker_thread.started.connect(self._worker.run)
         self._worker.finished.connect(self._handle_run_success)
         self._worker.failed.connect(self._handle_run_failure)
+        self._worker.cancelled.connect(self._handle_run_cancelled)
         self._worker.finished.connect(self._worker_thread.quit)
         self._worker.failed.connect(self._worker_thread.quit)
+        self._worker.cancelled.connect(self._worker_thread.quit)
         self._worker_thread.finished.connect(self._cleanup_worker)
         self._worker_thread.start()
+
+    def _cancel_agent_run(self) -> None:
+        if self._cancel_event and not self._cancel_event.is_set():
+            self._cancel_event.set()
+            self._cancel_button.setEnabled(False)
+            self._set_status("Отмена запроса...")
 
     def _refresh_models(self) -> None:
         api_key = self._api_key_edit.text().strip()
@@ -235,15 +252,22 @@ class AgentDockWidget(QtWidgets.QDockWidget):
     # Worker callbacks
     # ------------------------------------------------------------------
     def _handle_run_success(self, summary: Dict[str, Any]) -> None:
-        self._run_button.setEnabled(True)
+        self._finalize_agent_run()
         self._set_status("Готово")
         self._response_output.setPlainText(json.dumps(summary, ensure_ascii=False, indent=2))
         self._update_artifact_list(summary)
 
     def _handle_run_failure(self, message: str) -> None:
-        self._run_button.setEnabled(True)
+        self._finalize_agent_run()
         self._set_status("Ошибка", error=True)
         self._response_output.setPlainText(message)
+        self._clear_artifacts()
+
+    def _handle_run_cancelled(self) -> None:
+        self._finalize_agent_run()
+        self._set_status("Запрос отменён пользователем")
+        if not self._response_output.toPlainText().strip():
+            self._response_output.setPlainText("Запрос был отменён пользователем до завершения.")
         self._clear_artifacts()
 
     def _handle_models_ready(self, models: List[OpenRouterModelInfo]) -> None:
@@ -478,6 +502,11 @@ class AgentDockWidget(QtWidgets.QDockWidget):
         if hasattr(self, "_run_selected_button"):
             self._run_selected_button.setEnabled(False)
 
+    def _finalize_agent_run(self) -> None:
+        self._run_button.setEnabled(True)
+        self._cancel_button.setEnabled(False)
+        self._cancel_event = None
+
     def _update_artifact_list(self, summary: Dict[str, Any]) -> None:
         artifacts = summary.get("artifacts") if isinstance(summary, dict) else None
         if not isinstance(artifacts, list):
@@ -638,6 +667,7 @@ class _AgentWorker(QtCore.QObject):
 
     finished = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
+    cancelled = QtCore.Signal()
 
     def __init__(
         self,
@@ -645,12 +675,14 @@ class _AgentWorker(QtCore.QObject):
         config_path: Optional[Path],
         llm_overrides: Optional[Dict[str, Any]] = None,
         iteration_limit: Optional[int] = None,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         super().__init__()
         self._requirement = requirement
         self._config_path = config_path
         self._llm_overrides = llm_overrides or {}
         self._iteration_limit = iteration_limit
+        self._cancel_event = cancel_event
 
     @QtCore.Slot()
     def run(self) -> None:
@@ -660,10 +692,15 @@ class _AgentWorker(QtCore.QObject):
             if isinstance(self._iteration_limit, int) and self._iteration_limit > 0:
                 config.pipeline.max_iterations = self._iteration_limit
             agent = DesignAgent(config)
-            report = agent.run(self._requirement)
+            report = agent.run(self._requirement, is_cancelled=self._is_cancelled)
             self.finished.emit(_report_to_summary(report))
+        except PipelineCancelledError:
+            self.cancelled.emit()
         except Exception:  # pragma: no cover - defensive
             self.failed.emit(traceback.format_exc())
+
+    def _is_cancelled(self) -> bool:
+        return bool(self._cancel_event and self._cancel_event.is_set())
 
     def _apply_llm_overrides(self, config: AppConfig) -> None:
         if not self._llm_overrides:

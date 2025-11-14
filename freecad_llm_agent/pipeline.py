@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Callable, Iterable, List, Optional, Sequence
 
 from .config import AppConfig
 from .freecad_runner import FreeCADEngine
@@ -53,6 +53,10 @@ class PipelineReport:
         return None
 
 
+class PipelineCancelledError(RuntimeError):
+    """Raised when the pipeline run is interrupted by the caller."""
+
+
 class DesignAgent:
     """Main entry point coordinating the LLM, FreeCAD runtime and renderer."""
 
@@ -63,14 +67,26 @@ class DesignAgent:
         self._engine = FreeCADEngine(config.freecad, config.pipeline.workspace)
         self._renderer = Renderer(config.renderer)
 
-    def run(self, requirement: str) -> PipelineReport:
+    def run(
+        self,
+        requirement: str,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> PipelineReport:
         report = PipelineReport(requirement=requirement)
         errors: List[str] = []
         assembly_required = self._require_assembly(requirement)
         pending_additional_views = False
         script_history: List[str] = []
 
+        def _should_cancel() -> bool:
+            return bool(is_cancelled and is_cancelled())
+
+        def _ensure_not_cancelled() -> None:
+            if _should_cancel():
+                raise PipelineCancelledError("Pipeline run was cancelled")
+
         for iteration in range(1, self._config.pipeline.max_iterations + 1):
+            _ensure_not_cancelled()
             logger.info("Starting iteration %s", iteration)
             context = ScriptGenerationContext(
                 requirement=requirement,
@@ -84,8 +100,11 @@ class DesignAgent:
             )
             script = self._generator.generate(context)
             script_history.append(script)
+            _ensure_not_cancelled()
             execution = self._engine.run_script(script, iteration)
+            _ensure_not_cancelled()
             renders = self._renderer.render(requirement, iteration)
+            _ensure_not_cancelled()
             review = self._review_renders(requirement, iteration, renders, execution.success)
             pending_additional_views = pending_additional_views or review.needs_additional_views
             artifact = IterationArtifact(
@@ -107,6 +126,7 @@ class DesignAgent:
 
             logger.warning("Iteration %s failed: %s", iteration, execution.error)
             errors.append(self._format_execution_feedback(iteration, execution))
+            _ensure_not_cancelled()
 
         return report
 
@@ -180,4 +200,10 @@ class DesignAgent:
         return [f"... truncated {truncated} earlier lines ...", *lines[-limit:]]
 
 
-__all__ = ["DesignAgent", "PipelineReport", "IterationArtifact", "RenderReview"]
+__all__ = [
+    "DesignAgent",
+    "PipelineReport",
+    "IterationArtifact",
+    "RenderReview",
+    "PipelineCancelledError",
+]
