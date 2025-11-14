@@ -95,3 +95,32 @@ def test_pipeline_respects_cancellation(tmp_path: Path):
 
     with pytest.raises(PipelineCancelledError):
         agent.run("Отмена после генерации", is_cancelled=lambda: bool(generator.contexts))
+
+
+@pytest.mark.parametrize(
+    "wrapped, expected",
+    [
+        ("```python\nprint('ok')\n```", "print('ok')"),
+        ("'''\nprint('ok')\n'''", "print('ok')"),
+        ('"""\nprint("ok")\n"""', 'print("ok")'),
+    ],
+)
+def test_pipeline_strips_script_wrappers(tmp_path: Path, wrapped: str, expected: str):
+    config = AppConfig()
+    config.pipeline.workspace = tmp_path / "artifacts"
+    config.renderer.image_dir = config.pipeline.workspace / "renders"
+    agent = DesignAgent(config)
+    generator = RecordingGenerator([wrapped])
+    agent._generator = generator  # type: ignore[assignment]
+    agent._renderer = NoopRenderer()
+
+    def fake_review(*_args, **_kwargs):  # type: ignore[no-untyped-def]
+        return RenderReview(feedback="ok")
+
+    agent._review_renders = fake_review  # type: ignore[assignment]
+
+    report = agent.run("Снять обертку")
+    assert report.artifacts, "Agent must record iteration output"
+    artifact = report.artifacts[0]
+    assert artifact.script_body == expected
+    assert artifact.script_path.read_text(encoding="utf-8") == expected
