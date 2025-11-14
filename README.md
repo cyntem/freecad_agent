@@ -71,6 +71,14 @@ The CLI returns JSON with the list of iterations and paths to the generated scri
 4. Restart FreeCAD so it picks up the new workbench.
 5. Open **Tools → Addon manager** (optional) and verify that the **LLM Agent** workbench is listed.
 
+### Using the extension with the Snap build of FreeCAD on Linux
+When FreeCAD is installed via Snap, the sandboxed environment uses a different configuration path. Follow the steps below instead of the generic Linux instructions above:
+
+1. Ensure the Snap package has permission to access your home directory, e.g. `snap connect freecad:removable-media` if you plan to work outside `~/snap/freecad`.
+2. Find the Snap-specific `Mod` directory: `~/snap/freecad/current/.local/share/FreeCAD/Mod`.
+3. Copy this repository (or create a symlink) into that folder, for example `ln -s /path/to/freecad_agent ~/snap/freecad/current/.local/share/FreeCAD/Mod/LLMAgent`.
+4. Restart the Snap instance of FreeCAD and confirm the **LLM Agent** workbench appears under **Tools → Addon manager**.
+
 After these steps the extension becomes available in the FreeCAD UI.
 
 ## FreeCAD extension and graphical interface
