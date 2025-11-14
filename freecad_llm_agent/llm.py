@@ -6,10 +6,14 @@ import base64
 import json
 import logging
 import mimetypes
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Dict, Any
+
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 try:  # pragma: no cover - optional dependency for remote providers
     import httpx
@@ -109,6 +113,8 @@ class _BaseHTTPChatClient(LLMClient):
         timeout: float = 60.0,
         path: str = "/chat/completions",
         extra_params: Optional[dict[str, str]] = None,
+        max_retries: int = 3,
+        retry_backoff: float = 1.0,
     ) -> None:
         if httpx is None:  # pragma: no cover - runtime guard
             raise RuntimeError("httpx is required for HTTP-based LLM providers. Install it via pip.")
@@ -118,6 +124,8 @@ class _BaseHTTPChatClient(LLMClient):
         self._temperature = temperature
         self._path = path
         self._extra_params = extra_params or {}
+        self._max_retries = max(1, max_retries)
+        self._retry_backoff = max(0.0, retry_backoff)
 
     def complete(self, messages: Sequence[Message], images: Optional[Iterable[str]] = None) -> str:
         payload = {
@@ -127,13 +135,50 @@ class _BaseHTTPChatClient(LLMClient):
             "temperature": self._temperature,
         }
         payload.update(self._extra_params)
-        response = self._client.post(self._path, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        try:
-            return data["choices"][0]["message"]["content"].strip()
-        except (KeyError, IndexError) as error:  # pragma: no cover - defensive
-            raise RuntimeError(f"Malformed LLM response: {data}") from error
+        last_error: Optional[httpx.HTTPStatusError] = None
+        for attempt in range(1, self._max_retries + 1):
+            response = self._client.post(self._path, json=payload)
+            try:
+                response.raise_for_status()
+                data = response.json()
+                try:
+                    return data["choices"][0]["message"]["content"].strip()
+                except (KeyError, IndexError) as error:  # pragma: no cover - defensive
+                    raise RuntimeError(f"Malformed LLM response: {data}") from error
+            except httpx.HTTPStatusError as error:
+                if not self._should_retry(error, attempt):
+                    raise
+                last_error = error
+                delay = self._compute_retry_delay(error.response, attempt)
+                logger.warning(
+                    "LLM request failed with status %s. Retrying in %.2f seconds", error.response.status_code, delay
+                )
+                if delay > 0:
+                    time.sleep(delay)
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("LLM request failed without an HTTP error")
+
+    def _should_retry(self, error: "httpx.HTTPStatusError", attempt: int) -> bool:
+        if attempt >= self._max_retries:
+            return False
+        response = error.response
+        if response is None:
+            return False
+        status = response.status_code
+        return status == 429 or 500 <= status < 600
+
+    def _compute_retry_delay(self, response: Optional["httpx.Response"], attempt: int) -> float:
+        if response is not None:
+            retry_after = response.headers.get("Retry-After")
+            if retry_after:
+                parsed = _parse_retry_after(retry_after)
+                if parsed is not None:
+                    return parsed
+        base_delay = self._retry_backoff or 0.0
+        if base_delay == 0.0:
+            return 0.0
+        return base_delay * (2 ** (attempt - 1))
 
 
 class OpenAILLMClient(_BaseHTTPChatClient):
@@ -385,6 +430,24 @@ def dump_messages(messages: Sequence[Message]) -> str:
     """Return a human-readable representation of the conversation."""
 
     return json.dumps([message.__dict__ for message in messages], ensure_ascii=False, indent=2)
+
+
+def _parse_retry_after(value: str) -> Optional[float]:
+    """Parse ``Retry-After`` header values (seconds or HTTP-date)."""
+
+    try:
+        seconds = float(value)
+        return seconds if seconds >= 0 else None
+    except ValueError:
+        try:
+            retry_datetime = parsedate_to_datetime(value)
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return None
+        if retry_datetime.tzinfo is None:
+            retry_datetime = retry_datetime.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        delay = (retry_datetime - now).total_seconds()
+        return delay if delay >= 0 else 0.0
 
 
 __all__ = [
